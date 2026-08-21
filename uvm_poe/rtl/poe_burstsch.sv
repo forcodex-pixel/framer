@@ -5,18 +5,14 @@
 //      当前 ts 以前的 burst）；pre_read 插队 burst 无线程归属，跳过本检查
 //   ② 不满足"O 窗反压 且 burst 涉及 O 窗操作"（owin_bp=1 时 tr=1 的 burst 阻塞）
 // - c_task（burst_type=1）新增条件（不替换公共条件）：按 c0/c1 判任务是否需发 dma_ctrl，
-//   需要时查 CSR.dma_c[dma_id] 确认生效（bit=1）；按 cw 条目 op_type 区分任务类型：
-//   - loc（op_type=0）：C 窗独享位置（dma_id 0..3）固定属于本线程、不占共享池；
-//     共享资源（dma_id 4..7）需可用才放行：cw_fifo_cnt ≥ N_loc_shared 且
-//     该线程共享占用 + N_loc_shared ≤ 4。
-//   - free（op_type=1）：释放资源，不消耗共享池，无条件放行（lock/free 成对，
-//     不因资源条件阻塞，避免 th_res 满时 free 与 loc 互相死锁）。
+//   需要时查 CSR.dma_c[dma_id] 确认生效（bit=1）。C 窗每线程独享 8 个固定位置
+//   （无共享池/占用计数），c_task 不再需要资源预检，无条件放行
+//   （lock/free 由 ts 级互斥锁保证成对与互斥）。
 //   pre_read 插队 burst 暂不占资源（跳过）。
 // - 发射路由：burst_type=0（i/v_task）→ CU0/CU1 两个单元（q0→CU0、q1→CU1）；
 //   =1（c_task）→ dma_ctrl（dma 单路，两路 c_task 同拍只发 q0，q1 保留下一拍）
 //   （操作指令格式见方案文档：vld+th_id+op_type+smc_addr，每拍 ≤4 路）
-// - owin_bp 由外部提供（O 窗资源池内部设计后续补充）；C 窗共享资源池由 dma_ctrl 的
-//   256 深 FIFO 实际管理（burst_sch 依据 cw_fifo_cnt / th_res_n 做共享资源发射条件）
+// - owin_bp 由外部提供（O 窗资源池内部设计后续补充）
 module poe_burstsch #(
     parameter int MAX_THREADS = 64,
     parameter int MAX_TS = 16,
@@ -39,13 +35,8 @@ module poe_burstsch #(
     input logic [BURST_W-1:0] q1_burst,
     input logic q1_pre,
     output logic q1_ack,
-    // ---- 线程状态 / CSR / C 窗资源池状态 ----
+    // ---- 线程状态 ----
     input logic [MAX_THREADS*TS_ID_W-1:0] thread_curts,
-    input logic [MAX_THREADS*8-1:0] csr_dma_c,
-    input logic [MAX_THREADS*384-1:0] csr_cw, // 查 cw 条目 op_type 区分 loc/free
-    input logic [9:0] cw_fifo_cnt,
-    input logic [MAX_THREADS*3-1:0] th_res_n,
-    input logic [7:0] pre_dma_c,
     // ---- O 窗反压（资源池设计后续补充） ----
     input logic owin_bp,
     // ---- 发射输出（每拍 ≤2）：i/v_task → CU0/CU1；c_task → dma_ctrl ----
@@ -156,8 +147,6 @@ module poe_burstsch #(
     logic emit0_cond, emit1_cond; // 源侧条件
     logic avail0, avail1; // 源侧条件 && 目的端可接收
     burst_c_t bc0, bc1;
-    logic [7:0] dma_c0, dma_c1;
-    logic [1:0] need_loc0, need_loc1; // 需执行且为 loc 的任务数（0..2）
     always_comb begin
         bc0 = q0_burst;
         bc1 = q1_burst;
@@ -168,32 +157,6 @@ module poe_burstsch #(
         emit1_cond = q1_vld &&
     (q1_pre || (q1_ts == thread_curts[q1_tid*TS_ID_W +: TS_ID_W])) &&
                 !(owin_bp && bc1.tr);
-        // c_task 查询 CSR.dma_c：c0/c1 有效且 dma_c 置位的任务数 N；资源池可用才放行
-        if (q0_pre) dma_c0 = pre_dma_c;
-        else dma_c0 = csr_dma_c[q0_tid*8 +: 8];
-        if (q1_pre) dma_c1 = pre_dma_c;
-        else dma_c1 = csr_dma_c[q1_tid*8 +: 8];
-        // loc 且共享（dma_id≥4）的任务数：消耗共享池，需资源条件
-        need_loc0 = (bc0.c0 & dma_c0[bc0.dma_id0] & bc0.dma_id0[2]
-                     & !csr_cw[q0_tid*384 +: 384][bc0.dma_id0*48 +: 48][27])
-                    + (bc0.vld_cu & bc0.c1 & dma_c0[bc0.dma_id1] & bc0.dma_id1[2]
-                       & !csr_cw[q0_tid*384 +: 384][bc0.dma_id1*48 +: 48][27]);
-        need_loc1 = (bc1.c0 & dma_c1[bc1.dma_id0] & bc1.dma_id0[2]
-                     & !csr_cw[q1_tid*384 +: 384][bc1.dma_id0*48 +: 48][27])
-                    + (bc1.vld_cu & bc1.c1 & dma_c1[bc1.dma_id1] & bc1.dma_id1[2]
-                       & !csr_cw[q1_tid*384 +: 384][bc1.dma_id1*48 +: 48][27]);
-        if (bc0.burst_type == 1'b1) begin
-            if (!q0_pre)
-                emit0_cond = emit0_cond &&
-                    (cw_fifo_cnt >= need_loc0) &&
-                        ({2'b0, th_res_n[q0_tid*3 +: 3]} + {2'b0, need_loc0} <= 5'd4);
-        end
-        if (bc1.burst_type == 1'b1) begin
-            if (!q1_pre)
-                emit1_cond = emit1_cond &&
-                    (cw_fifo_cnt >= need_loc1) &&
-                        ({2'b0, th_res_n[q1_tid*3 +: 3]} + {2'b0, need_loc1} <= 5'd4);
-        end
         // 目的端 ack：i/v → CU0/CU1；c_task → dma_ctrl
         avail0 = emit0_cond && (bc0.burst_type == 1'b0 ? cu0_ack : dma_ack);
         avail1 = emit1_cond && (bc1.burst_type == 1'b0 ? cu1_ack : dma_ack);

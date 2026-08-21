@@ -236,12 +236,11 @@ package poe_thread_tpl_pkg;
                         tpl_c(1'b0, 3'd1, 8'd4), '0, '0); // free dma1
         tpl_put_ts(t, 3, tpl_iv(1'b1, 3'd2, 1'b0, 1'b0, 3'd3),
                         tpl_c(1'b0, 3'd2, 8'd4), '0, '0); // loc dma2
-        tpl_put_ts(t, 4, tpl_iv(1'b1, 3'd2, 1'b0, 1'b0, 3'd4),
-                        tpl_c(1'b0, 3'd3, 8'd4), '0, '0); // free dma3
-        // 共享配对（dma4/5）在 ts4 尾部
+        // ts4：free dma3 + loc dma4 + free dma5（一次写入，避免覆盖）
         tpl_put_ts(t, 4, tpl_iv(1'b1, 3'd4, 1'b0, 1'b0, 3'd4),
-                        tpl_c(1'b0, 3'd4, 8'd4),
-                        tpl_c(1'b0, 3'd5, 8'd4), '0); // loc dma4 + free dma5
+                        tpl_c(1'b0, 3'd3, 8'd4), // free dma3
+                        tpl_c(1'b0, 3'd4, 8'd4), // loc dma4
+                        tpl_c(1'b0, 3'd5, 8'd4)); // free dma5
         t.vtsk_c = 8'hFF;
         t.dma_c = 8'h3F; // dma0..5 有效
         t.cw = '0;

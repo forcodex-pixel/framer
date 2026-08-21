@@ -6,9 +6,8 @@
 //   csr_t     614bit：err/ccr/sys_ts/th_id(6b)/th_stat/o_mes/cur_ts/vtsk_c/dma_c/tw/cw
 //   cw_entry  48bit（8×6B/线程，dma_id 索引）
 //   c_wnd_entry 168bit（21B，C 窗资源条目）
-// C 窗分独享/共享两类（dma_ctrl 管理）：
-//   独享 64×4：每线程固定 4 个位置（全局号 = tid×4+k，k=0..3），cw[dma_id 0..3] 固定映射；
-//   共享 256：由 dma_ctrl 资源管理 FIFO 分配，cw[dma_id 4..7] 固定映射。
+// C 窗：每线程独享 8 个固定位置（全局号 = tid×8+k，k=0..7），cw 8 项
+// （dma_id 0..7）全部固定映射，无共享资源池/FIFO。
 // 资源生命周期完全由 c_task 控制（lock/free 成对出现），线程结束不兜底归还。
 // ============================================================================
 package poe_types_pkg;
@@ -84,7 +83,7 @@ package poe_types_pkg;
         logic op_type; // loc/free：0=loc（申请），1=free（释放）
         logic r; // c_line 有效（smc 读出刷新 c 窗 c_line 后写 1）
         logic o; // 1=该线程占据该 c 窗资源
-        logic [7:0] c_line_num; // c 窗资源号（64×4=256 个资源）
+        logic [7:0] c_line_num; // C 窗位置（线程内索引 = dma_id，0..7；全局位置 = tid×8+dma_id，内部 9bit 计算）
         logic [7:0] start_ts; // 起始 ts
         logic [7:0] occ_ts; // 占据 ts 数
         logic rsv; // 保留
@@ -98,7 +97,7 @@ package poe_types_pkg;
         logic o; // 占用标志：申请到资源后写 1
         logic r; // c_line 有效：smc 读出刷新 c 窗 c_line 后写 1
         logic [8:0] cnt; // 老化计数：超上限强制释放（o=0，资源号入 FIFO）
-        logic [7:0] ind; // c 窗资源号（64×4=256 个资源）
+        logic [7:0] ind; // C 窗位置（线程内索引 = dma_id，0..7；全局位置 = tid×8+dma_id，内部 9bit 计算）
     } c_wnd_entry_t;
 
     localparam int CSR_W = 8+64+48+6+8+8+8+8+8+64+384;

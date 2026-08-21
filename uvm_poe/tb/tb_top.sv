@@ -86,8 +86,6 @@ module tb_top;
     logic [24575:0] csr_cw;
     logic [7:0] pre_dma_c;
     logic [255:0] pre_cw;
-    logic [9:0] cw_fifo_cnt;
-    logic [191:0] th_res_n; // 每线程共享占用数（3bit×64）
     logic owin_bp;
     logic emit_cu_vld0, cu0_ack;
     logic [5:0] emit_cu_tid0;
@@ -167,10 +165,6 @@ module tb_top;
     .q1_vld(q1_vld), .q1_tid(q1_tid), .q1_ts(q1_ts),
     .q1_tidx(q1_tidx), .q1_burst(q1_burst), .q1_pre(q1_pre), .q1_ack(q1_ack),
     .thread_curts(ready_curts),
-    .csr_dma_c(csr_dma_c),
-    .csr_cw(csr_cw),
-    .cw_fifo_cnt(cw_fifo_cnt), .th_res_n(th_res_n),
-    .pre_dma_c(pre_dma_c),
     .owin_bp(owin_bp),
     .emit_cu_vld0(emit_cu_vld0), .emit_cu_tid0(emit_cu_tid0),
     .emit_cu_tidx0(emit_cu_tidx0), .emit_cu_burst0(emit_cu_burst0),
@@ -215,7 +209,6 @@ module tb_top;
     .thread_curts(ready_curts),
     .cw_upd_vld(cw_upd_vld), .cw_upd_tid(cw_upd_tid),
     .cw_upd_ind(cw_upd_ind), .cw_upd_data(cw_upd_data),
-    .cw_fifo_cnt(cw_fifo_cnt), .th_res_n(th_res_n),
     .dma_ack(dma_ack),
     .dma_done_vld(dma_done_vld), .dma_done_tid(dma_done_tid),
     .dma_done_tidx(dma_done_tidx),
@@ -231,35 +224,8 @@ module tb_top;
     initial thm_logf = $fopen("thm_dbg.log", "w");
     always @(posedge clk) begin
         burst_c_t b0, b1;
-        logic [7:0] dc0, dc1;
-        logic [1:0] need_loc0, need_loc1;
-        if ($time > 3600000 && $time < 4000000) begin
-            automatic int rcnt = 0;
-            automatic int busy = 0;
-            automatic int rd = 0;
-            for (int i = 0; i < 64; i++) begin
-                if (ready_mask[i]) rcnt++;
-                if (u_thm.th_state[i] != 2'd0) busy++;
-                if (u_thm.th_state[i] == 2'd1) rd++;
-            end
-            $fdisplay(thm_logf, "DIAG t=%0t ready=%0d busy=%0d READY=%0d ko_vld=%0d ko_rdy=%0d",
-                      $time, rcnt, busy, rd, u_if.out_vld, ko_rdy);
-        end
         b0 = q0_burst;
         b1 = q1_burst;
-        if (q0_pre) dc0 = pre_dma_c;
-        else dc0 = csr_dma_c[q0_tid*8 +: 8];
-        if (q1_pre) dc1 = pre_dma_c;
-        else dc1 = csr_dma_c[q1_tid*8 +: 8];
-        // loc 且共享（dma_id≥4）的有效任务数（消耗共享池，需资源条件；free 无条件放行）
-        need_loc0 = (b0.c0 & dc0[b0.dma_id0] & b0.dma_id0[2]
-                     & !csr_cw[q0_tid*384 +: 384][b0.dma_id0*48 +: 48][27])
-                    + (b0.vld_cu & b0.c1 & dc0[b0.dma_id1] & b0.dma_id1[2]
-                       & !csr_cw[q0_tid*384 +: 384][b0.dma_id1*48 +: 48][27]);
-        need_loc1 = (b1.c0 & dc1[b1.dma_id0] & b1.dma_id0[2]
-                     & !csr_cw[q1_tid*384 +: 384][b1.dma_id0*48 +: 48][27])
-                    + (b1.vld_cu & b1.c1 & dc1[b1.dma_id1] & b1.dma_id1[2]
-                       & !csr_cw[q1_tid*384 +: 384][b1.dma_id1*48 +: 48][27]);
         // 新语义：队列允许出现 cur_ts 及更靠后的 burst；q.ts < cur_ts 才属于异常。
         // pre_read 插队 burst 无线程归属，跳过 ts/cur_ts 比较
     if (q0_vld && !q0_pre && (q0_ts < ready_curts[q0_tid*6 +: 6]))
@@ -299,21 +265,6 @@ module tb_top;
             $time, emit_dma_tid, eb.dma_id0, eb.dma_id1, eb.occ_ts0, eb.occ_ts1,
             eb.vld_cu, eb.c0, eb.c1, emit_dma_pre);
         end
-        // c_task 阻塞观测：公共条件满足但 loc 的 C 窗共享资源不足（FIFO 空闲不足或线程共享占用达上限 4）
-        if (q0_vld && (b0.burst_type == 1'b1) && !q0_pre &&
-    (q0_ts == ready_curts[q0_tid*6 +: 6]) &&
-                !((cw_fifo_cnt >= need_loc0) &&
-                    ({2'b0, th_res_n[q0_tid*3 +: 3]} + {2'b0, need_loc0} <= 5'd4)))
-                    $fdisplay(thm_logf, "CBLOCK0 t=%0t tid=%0d ts=%0d dma=%0d/%0d loc_sh=%0d fifo=%0d res=%0d",
-                    $time, q0_tid, q0_ts, b0.dma_id0, b0.dma_id1, need_loc0,
-                    cw_fifo_cnt, th_res_n[q0_tid*3 +: 3]);
-        if (q1_vld && (b1.burst_type == 1'b1) && !q1_pre &&
-    (q1_ts == ready_curts[q1_tid*6 +: 6]) &&
-                !((cw_fifo_cnt >= need_loc1) &&
-                    ({2'b0, th_res_n[q1_tid*3 +: 3]} + {2'b0, need_loc1} <= 5'd4)))
-                    $fdisplay(thm_logf, "CBLOCK1 t=%0t tid=%0d ts=%0d dma=%0d/%0d loc_sh=%0d fifo=%0d res=%0d",
-                    $time, q1_tid, q1_ts, b1.dma_id0, b1.dma_id1, need_loc1,
-                    cw_fifo_cnt, th_res_n[q1_tid*3 +: 3]);
         if (iss_vld0)
             $fdisplay(thm_logf, "ISS0 t=%0t tid=%0d curts=%0d burst_ts=%0d pc=%0d need=%0d tscnt=%0d st=%0d",
         $time, iss_tid0, ready_curts[iss_tid0*6 +: 6],
@@ -396,15 +347,19 @@ module tb_top;
     final begin
         integer i;
         int tot;
+        int idle;
         tot = 0;
+        idle = 0;
         for (i = 0; i < 64; i++) begin
-            tot = tot + u_dma.th_res_n_r[i];
-            if (u_dma.th_res_n_r[i] != 0)
-                $fdisplay(thm_logf, "RESLEAK tid=%0d n=%0d", i, u_dma.th_res_n_r[i]);
+            if (u_thm.th_state[i] == 2'd0) idle++;
+            for (int k = 0; k < 8; k++)
+                if (u_dma.c_wnd[i][k].o) begin
+                    tot++; // C 窗独享占用（应全部释放）
+                    if (tot <= 12)
+                        $fdisplay(thm_logf, "CW_OCC tid=%0d k=%0d tag=%h", i, k, u_dma.c_wnd[i][k].tag);
+                end
         end
-        // 资源池收支校验：f_cnt 应回到 256（共享全部归还）、th_res_total 应为 0
-        // （lock/free 由 c_task 成对控制，线程结束不兜底）
-        $fdisplay(thm_logf, "FINAL f_cnt=%0d th_res_total=%0d st=%0d alloc=%0d free=%0d",
-        u_dma.f_cnt, tot, u_dma.st, u_dma.dbg_alloc, u_dma.dbg_free);
+        // 校验：所有线程应回到 IDLE、C 窗独享条目全部释放（loc/free 成对）
+        $fdisplay(thm_logf, "FINAL idle=%0d cw_occ=%0d dma_st=%0d", idle, tot, u_dma.st);
     end
 endmodule
