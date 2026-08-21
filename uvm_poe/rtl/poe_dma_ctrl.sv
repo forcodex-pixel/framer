@@ -30,7 +30,7 @@ module poe_dma_ctrl #(
     input logic emit_dma_vld,
     input logic [5:0] emit_dma_tid,
     input logic [3:0] emit_dma_tidx,
-    input logic [31:0] emit_dma_burst,
+    input logic [BURST_W-1:0] emit_dma_burst,
     input logic emit_dma_pre,
     output logic dma_ack,
     // ---- CSR / 线程状态（THM） ----
@@ -83,7 +83,7 @@ module poe_dma_ctrl #(
     state_t st;
     logic [5:0] cur_tid;
     logic [3:0] cur_tidx;
-    logic [31:0] cur_burst;
+    logic [BURST_W-1:0] cur_burst;
     logic [2:0] cur_dma_id;
     logic [19:0] cur_tag;
     logic cur_op; // 0=loc 1=free

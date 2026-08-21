@@ -115,9 +115,7 @@ class koa_oh_seq extends uvm_sequence #(koa_item);
             end
             begin
                 koa_item it = koa_item::type_id::create("it");
-                it.randomize_payload(KO_OVERHEAD);
                 it.pri = pri_arr[i];
-                it.ko_data = it.pack();
                 it.stream = (dir == 0) ? ST_OH_EXT : ST_OH_INS;
                 it.plane = plane_arr[i];
                 it.cid = plane_arr[i] * max_ch + chan_arr[i];

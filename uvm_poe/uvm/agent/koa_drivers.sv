@@ -29,7 +29,6 @@ class koa_driver extends uvm_driver #(koa_item);
                         `uvm_error("DRV", "OH_EXT item 挂到错误的业务源 driver")
                     end else begin
                         ko_pkg::g_tb_cfg.vif.oh_e_vld <= (1 << req.plane);
-                        ko_pkg::g_tb_cfg.vif.oh_e_data <= (req.ko_data << (req.plane * 384));
                         ko_pkg::g_tb_cfg.vif.oh_e_pri <= (req.pri << (req.plane * 3));
                         ko_pkg::g_tb_cfg.vif.oh_e_cid <= (req.cid << (req.plane * 17));
                         ko_pkg::g_tb_cfg.vif.oh_e_pos <= (req.pos << (req.plane * 3));
@@ -43,7 +42,6 @@ class koa_driver extends uvm_driver #(koa_item);
                         `uvm_error("DRV", "OH_INS item 挂到错误的业务源 driver")
                     end else begin
                         ko_pkg::g_tb_cfg.vif.oh_i_vld <= (1 << req.plane);
-                        ko_pkg::g_tb_cfg.vif.oh_i_data <= (req.ko_data << (req.plane * 384));
                         ko_pkg::g_tb_cfg.vif.oh_i_pri <= (req.pri << (req.plane * 3));
                         ko_pkg::g_tb_cfg.vif.oh_i_cid <= (req.cid << (req.plane * 17));
                         ko_pkg::g_tb_cfg.vif.oh_i_pos <= (req.pos << (req.plane * 3));
@@ -57,7 +55,6 @@ class koa_driver extends uvm_driver #(koa_item);
                         `uvm_error("DRV", "APS_EXT item 挂到错误的业务源 driver")
                     end else begin
                         ko_pkg::g_tb_cfg.vif.aps_e_vld <= (1 << req.plane);
-                        ko_pkg::g_tb_cfg.vif.aps_e_data <= (req.ko_data << (req.plane * 384));
                         ko_pkg::g_tb_cfg.vif.aps_e_pri <= (req.pri << (req.plane * 3));
                         ko_pkg::g_tb_cfg.vif.aps_e_cid <= (req.cid << (req.plane * 17));
                         ko_pkg::g_tb_cfg.vif.aps_e_pos <= (req.pos << (req.plane * 3));
@@ -71,7 +68,6 @@ class koa_driver extends uvm_driver #(koa_item);
                         `uvm_error("DRV", "APS_INS item 挂到错误的业务源 driver")
                     end else begin
                         ko_pkg::g_tb_cfg.vif.aps_i_vld <= (1 << req.plane);
-                        ko_pkg::g_tb_cfg.vif.aps_i_data <= (req.ko_data << (req.plane * 384));
                         ko_pkg::g_tb_cfg.vif.aps_i_pri <= (req.pri << (req.plane * 3));
                         ko_pkg::g_tb_cfg.vif.aps_i_cid <= (req.cid << (req.plane * 17));
                         ko_pkg::g_tb_cfg.vif.aps_i_pos <= (req.pos << (req.plane * 3));
@@ -85,7 +81,6 @@ class koa_driver extends uvm_driver #(koa_item);
                         `uvm_error("DRV", "ALM item 挂到错误的业务源 driver")
                     end else begin
                         ko_pkg::g_tb_cfg.vif.alm_vld <= (1 << req.plane);
-                        ko_pkg::g_tb_cfg.vif.alm_data <= (req.ko_data << (req.plane * 384));
                         ko_pkg::g_tb_cfg.vif.alm_pri <= (req.pri << (req.plane * 3));
                         ko_pkg::g_tb_cfg.vif.alm_cid <= (req.cid << (req.plane * 17));
                         ko_pkg::g_tb_cfg.vif.alm_pos <= (req.pos << (req.plane * 3));
@@ -99,7 +94,6 @@ class koa_driver extends uvm_driver #(koa_item);
                         `uvm_error("DRV", "UART_EXT item 挂到错误的业务源 driver")
                     end else begin
                         ko_pkg::g_tb_cfg.vif.u_e_vld <= 1'b1;
-                        ko_pkg::g_tb_cfg.vif.u_e_data <= req.ko_data;
                         ko_pkg::g_tb_cfg.vif.u_e_pri <= req.pri;
                         do @(posedge ko_pkg::g_tb_cfg.vif.clk);
                         while (ko_pkg::g_tb_cfg.vif.u_e_rdy !== 1'b1);
@@ -111,7 +105,6 @@ class koa_driver extends uvm_driver #(koa_item);
                         `uvm_error("DRV", "UART_INS item 挂到错误的业务源 driver")
                     end else begin
                         ko_pkg::g_tb_cfg.vif.u_i_vld <= 1'b1;
-                        ko_pkg::g_tb_cfg.vif.u_i_data <= req.ko_data;
                         ko_pkg::g_tb_cfg.vif.u_i_pri <= req.pri;
                         do @(posedge ko_pkg::g_tb_cfg.vif.clk);
                         while (ko_pkg::g_tb_cfg.vif.u_i_rdy !== 1'b1);

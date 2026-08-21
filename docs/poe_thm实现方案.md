@@ -31,9 +31,11 @@ THM 是 KOA → POE 链路的枢纽：接收 KO 报文与线程描述，按 `(st
   （限制带预读请求的 KO 报文创建线程）。
 - **CSR 同步生成**：建线程时同步写 `csr_t` 表项（th_stat / cur_ts 与状态机同步），
   `dma_c` / `cw` 暴露给 burst_sch / dma_ctrl 查询。
-- **线程级互斥锁**：KO 报文可携带加锁请求（锁 ID 0..15，16 个独立锁），同一锁
-  同一时刻只允许一个线程执行（一级发射门控），从根源避免多个线程并发操作同一
-  smc 地址——dma_ctrl 的 loc/free 不再出现跨线程冲突场景（成对执行，零资源泄漏）。
+- **ts 级互斥锁**：锁声明在 burst 描述里（公共字段 lock_id/unlock_req/lock_req，
+  仅 ts 首个 burst st=1 生效），不再从 KOA 旁路输入；lock_req 的 ts 首个 burst
+  发射时获取锁，unlock_req 的 ts 完成时释放锁（一段 ts 持锁），线程结束兜底释放；
+  同一锁同一时刻只允许一个线程执行（一级发射门控），从根源避免多个线程并发
+  操作同一 smc 地址——dma_ctrl 的 loc/free 不再出现跨线程冲突场景。
 
 ## 2. 参数
 
@@ -45,7 +47,7 @@ THM 是 KOA → POE 链路的枢纽：接收 KO 报文与线程描述，按 `(st
 | `TS_ID_W` | 6 | ts 编号位宽（0..63，容纳跳转） |
 | `CID_W` | 17 | 保序键通道号位宽 |
 | `BUF_DEPTH` | 8 | 保序报文缓存深度 |
-| `N_LOCK` | 16 | 线程级互斥锁数量（锁 ID 0..15） |
+| `N_LOCK` | 16 | ts 级互斥锁数量（锁 ID 0..15） |
 
 内部位宽派生：`TS_W = $clog2(MAX_TS+1)`（=5，ts 数 1..16）；`th_bs_pc` / `th_off` 为 7bit
 （最大 16ts×4burst=64）；`th_sel_ts` 为 4bit（ts 序号 0..15）；`th_sel_idx` 为 3bit
@@ -53,29 +55,22 @@ THM 是 KOA → POE 链路的枢纽：接收 KO 报文与线程描述，按 `(st
 
 ## 3. 输入输出接口
 
-### 3.1 KOA 输入（KO 报文 + 线程描述）
+### 3.1 KOA 输入（有效信息；线程描述由模板池随机）
 
 | 信号 | 位宽 | 说明 |
 | --- | --- | --- |
-| `ko_vld` | 1 | KO 报文有效 |
-| `ko_data` | 384 | 48B KO 报文（行 1..6） |
+| `ko_vld` | 1 | 有效（不再承载 48B KO 报文） |
 | `ko_stream` | 3 | 来源流 0..6（保序键之一） |
 | `ko_cid` | 17 | 通道号（保序键之二，1 时隙粒度） |
 | `ko_pos` | 3 | 开销位置（保序键之三） |
 | `ko_pre_vld` | 4 | 预读入口指示（4 组，随 KO 报文；=1 时该组预读有效） |
 | `ko_dma_addr` | 80 | 预读入口 smc 地址（4×20bit） |
 | `ko_pre_op` | 4 | 预读入口操作类型（4×1bit：0=loc 1=free） |
-| `ko_lock_vld` | 1 | 线程级互斥锁请求（随 KO 报文；=1 时该报文创建的线程申请锁） |
-| `ko_lock_id` | 4 | 锁 ID（0..15） |
-| `th_ts_cnt` | 5 | 线程 ts 数（1..16） |
-| `th_bs_cnt` | 48 | 每 ts burst 数（16×3bit，ts0 固定 1） |
-| `th_ts_id` | 96 | 每 ts 编号（16×6bit，递增可跳转） |
-| `th_pri` | 3 | 线程 burst 优先级（0 最高，调度依据） |
-| `th_burst_seq` | 2048 | 每 ts 独立 burst 模式（16ts×4×32bit） |
-| `th_vtsk_c_seq` | 8 | 线程描述旁路（模拟 I_BUF_A，占位）：CSR vtsk_c 初始化值 |
-| `th_dma_c_seq` | 8 | 线程描述旁路：CSR dma_c 初始化值（8bit 掩码） |
-| `th_cw_seq` | 384 | 线程描述旁路：CSR cw 初始化值（8×6B） |
 | `ko_rdy` | 1 | 反压：`can_accept && !buf_ok && (!有预读 \|\| pre_buf_rdy)`（缓存放行拍反压 KOA；带预读的 KO 额外要求预读缓存空间） |
+
+> **线程描述来源**：THM 建线程时从线程模板池随机选取（`tpl_get($urandom % N_TPL)`，
+> 见 `poe_thread_tpl.sv`），不再从 KOA/激励旁路接收完整线程描述；保序缓存只存
+> 有效信息（预读 + stream/cid/pos）。
 
 ### 3.2 th_sch 一级发射
 
@@ -139,7 +134,6 @@ THM 是 KOA → POE 链路的枢纽：接收 KO 报文与线程描述，按 `(st
 | `th_ts_idx` | 4 | 当前在第几个 ts（序号 0..n-1） |
 | `th_ts_id_r` | 6×16 | 每 ts 编号（递增可跳转） |
 | `th_wait` | 8 | ISSUED 剩余打拍数（branch 1+3+t / 非 branch 1） |
-| `th_lock_vld` / `th_lock_id` | 1 / 4 | 线程互斥锁请求 / 锁 ID（随 KO 报文/缓存） |
 | `th_done_acc` | 3×16 | 每 ts 已完成 burst 数（done 按 tidx 累加） |
 | `th_need` | 3×16 | 每 ts 实际执行 burst 数（首个 branch 提前截断） |
 | `th_off` | 7×17 | 每 ts 起始累计偏移（off[k] = 前 k 个 ts 总长，组合） |
@@ -159,15 +153,16 @@ vtsk_c(8) / dma_c(8) / tw(64) / cw(8×48)`。
 `th_stat` 随状态机（READY/ISSUED/DONE/IDLE），`cur_ts` 随 done 推进写 ts 编号；
 `err / ccr / o_mes / tw` 为占位 0。
 
-### 4.4 线程级互斥锁表（`lock_owner[16]`）
+### 4.4 ts 级互斥锁表（`lock_owner[16]`）
 
 | 信号 | 位宽 | 含义 |
 | --- | --- | --- |
 | `lock_owner[i]` | 6 | 锁 i 的持有线程 tid；`63`=空闲 |
 
-> 锁与线程生命周期绑定：线程在一级发射（首次发射）时获取锁，T_DONE 时释放；
-> 同锁其他线程的 `ready_mask` 置 0（等待），锁释放后恢复可发射。锁 ID 由 KO
-> 旁路接口（`ko_lock_vld / ko_lock_id`）随报文/保序缓存携带。
+> 锁以 ts 为单位：lock_req 的 ts 首个 burst 发射时获取锁（登记 lock_owner）；
+> unlock_req 的 ts 完成时释放锁（该 ts 也在锁保护下执行完）；一段 ts 持锁，
+> 中间 ts 无需重复声明。同锁其他线程的 `ready_mask` 置 0（等待），锁释放后恢复
+> 可发射。锁声明在 burst 公共字段（lock_id/unlock_req/lock_req，仅 st=1 生效）。
 
 ### 4.3 保序报文缓存（`buf_mem[BUF_DEPTH]`）
 
@@ -235,12 +230,12 @@ tail+1、cnt+1。缓存满时 `can_accept=0` → `ko_rdy=0` 反压，vld 保持�
 - 取当前 burst `th_burst_r[th_sel_ts][th_sel_idx]`；
 - 状态 → ISSUED，CSR.th_stat 同步；
 - 打拍数：非 branch 1 拍；i/v branch `4 + $urandom % (branch_cnt+1)`（即 1+3+t）。
-- **互斥锁获取**：请求锁的线程在发射拍若锁空闲则登记持锁
-  （`lock_owner[th_lock_id] <= tid`）；同拍两个发射同锁时让 iss0 优先。
+- **互斥锁获取**：当前 burst 若为 ts 首个且 lock_req=1，发射拍若锁空闲则登记持锁
+  （`lock_owner[lock_id] <= tid`）；同拍两个发射同锁时让 iss0 优先。
 
-> 一级发射门控（ready_mask）：`!th_lock_vld || lock_owner[lock_id]==tid ||
-> lock_owner[lock_id]==FREE`——同锁线程中只有持锁者（或锁空闲待抢）可发射，
-> 未持锁线程的 ready_mask=0 等待，直到持锁线程 T_DONE 释放。
+> 一级发射门控（ready_mask）：当前 burst 为 ts 首个且 lock_req=1 时，仅当
+> `lock_owner[lock_id]==tid || lock_owner[lock_id]==FREE` 可发射；否则
+> ready_mask=0 等待，直到持锁线程释放。
 
 ### 6.5 ISSUED 打拍推进 bs_pc
 
@@ -264,14 +259,15 @@ bs_pc 跨 ts 连续递增，因此 burst 队列可包含当前 ts 及更靠后 t
 
 ### 6.7 线程释放
 
-时序侧将 T_DONE 回 IDLE、CSR.th_stat 同步，槽位可复用；若本线程是某互斥锁的
-持有者（`lock_owner[th_lock_id]==tid`），同拍释放该锁（`lock_owner<=FREE`），
-等待同锁的线程恢复可发射。C 窗资源不随线程释放（lock/free 由 c_task 成对控制）。
+时序侧将 T_DONE 回 IDLE、CSR.th_stat 同步，槽位可复用；unlock_req 的 ts 完成时
+释放锁（done 推进跨过该 ts 时 `lock_owner<=FREE`），线程结束兜底扫描释放本线程
+持有的全部锁，等待同锁的线程恢复可发射。C 窗资源不随线程释放（lock/free 由
+c_task 成对控制）。
 
 ## 7. 占位 / 待细化项
 
 - `emit_vld/emit_tid`（burst_sch 二级发射通知）声明但未使用；
-- 200µs 回归：互斥锁机制下同锁线程互斥执行，loc/free 严格成对，
+- 200µs 回归：ts 级互斥锁机制下同锁线程互斥执行，loc/free 严格成对，
   共享资源 **alloc=free**（零泄漏，f_cnt=256），SCB 错配 0；
 - pre_read 接口已按方案实现：KOA 预读随报文入 SBUF（出队对齐输出）→ THM 建线程同拍
   转发（4 组 {vld,tid,dma_addr,op}）→ burst_sch 8 深预读缓存（最高优先级调度、满反压）；

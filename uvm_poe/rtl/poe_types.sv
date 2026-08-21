@@ -1,7 +1,8 @@
 // ============================================================================
 // POE 共享数据类型包（THM / th_sch / burst_sch / CU / dma_ctrl / tb 共用）
 // 对应《数据结构位宽总表.md》：
-//   burst     32bit（一种结构两种类型，burst_type 区分，字段重叠复用）
+//   burst     38bit（一种结构两种类型，burst_type 区分，字段重叠复用）
+//             锁字段（仅 ts 首个 burst st=1 时有效）：lock_id(4) + unlock_req(1) + lock_req(1)
 //   csr_t     614bit：err/ccr/sys_ts/th_id(6b)/th_stat/o_mes/cur_ts/vtsk_c/dma_c/tw/cw
 //   cw_entry  48bit（8×6B/线程，dma_id 索引）
 //   c_wnd_entry 168bit（21B，C 窗资源条目）
@@ -12,17 +13,23 @@
 // ============================================================================
 package poe_types_pkg;
 
-    // ---- burst 结构（32b = 4B）：一种结构、两种类型，burst_type 区分 ----
+    // ---- burst 结构（38b）：一种结构、两种类型，burst_type 区分 ----
     // 两种视图字段不完全相同，按类型复用同一比特位（两个 struct 位布局一致，可互 cast）：
     //  - burst_iv_t（burst_type=0）：tsk_id0/1、sub_pc0/1、ts_len、branch
     //  - burst_c_t （burst_type=1）：dma_id0/1、occ_ts0/1、rev
-    // 公共字段：st / tr / burst_type / vld_cu / c0 / c1
+    // 公共字段：lock_id / unlock_req / lock_req / st / tr / burst_type / vld_cu / c0 / c1
+    // 锁字段仅在 ts 首个 burst（st=1）生效：lock_req=1 时该 ts 发射前获取锁；
+    // unlock_req=1 时该 ts 完成时释放锁（一段 ts 持锁，由首/末 ts 声明）
     // 位布局：
-    //   [0] st | [1] tr | [5:2] iv{ts_len[2:0],branch} / c{rev} | [6] burst_type |
-    //   [7] vld_cu | [10:8] iv{tsk_id0} / c{dma_id0} | [11] c0 |
-    //   [14:12] iv{tsk_id1} / c{dma_id1} | [15] c1 |
-    //   [23:16] iv{sub_pc0} / c{occ_ts0} | [31:24] iv{sub_pc1} / c{occ_ts1}
+    //   [37:34] lock_id | [33] unlock_req | [32] lock_req |
+    //   [31] st | [30] tr | [29:26] iv{ts_len[2:0],branch} / c{rev} | [25] burst_type |
+    //   [24] vld_cu | [23:21] iv{tsk_id0} / c{dma_id0} | [20] c0 |
+    //   [19:17] iv{tsk_id1} / c{dma_id1} | [16] c1 |
+    //   [15:8] iv{sub_pc0} / c{occ_ts0} | [7:0] iv{sub_pc1} / c{occ_ts1}
     typedef struct packed {
+        logic [3:0] lock_id; // 锁 ID（0..15，仅 st=1 有效）
+        logic unlock_req; // 解锁请求（仅 st=1 有效，ts 完成时释放锁）
+        logic lock_req; // 加锁请求（仅 st=1 有效，ts 首个 burst 发射时获取锁）
         logic st; // 是否为所属 ts 的首个 burst
         logic tr; // 是否涉及 O 窗操作
         logic [2:0] ts_len; // 仅 i/v：所属 ts 包含 burst 数
@@ -38,6 +45,9 @@ package poe_types_pkg;
     } burst_iv_t;
 
     typedef struct packed {
+        logic [3:0] lock_id; // 锁 ID（0..15，仅 st=1 有效）
+        logic unlock_req; // 解锁请求（仅 st=1 有效）
+        logic lock_req; // 加锁请求（仅 st=1 有效）
         logic st; // 是否为所属 ts 的首个 burst
         logic tr; // 是否涉及 O 窗操作
         logic [3:0] rev; // 仅 c_task：保留位
@@ -51,7 +61,7 @@ package poe_types_pkg;
         logic [7:0] occ_ts1; // 仅 c_task：task1 占据的 ts 数
     } burst_c_t;
 
-    localparam int BURST_W = 32;
+    localparam int BURST_W = 38;
 
     // ---- CSR 表项（61B = 488bit）：建线程时同步生成 ----
     typedef struct packed {

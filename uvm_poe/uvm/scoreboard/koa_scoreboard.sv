@@ -143,10 +143,7 @@ class koa_scoreboard extends uvm_scoreboard;
                 if (all_ev[i].sbuf !== g)
                     `uvm_error("SCB", $sformatf("优先级组不符：输出组%0d 期望组%0d（@%0t）",
                     all_ev[i].sbuf, g, all_ev[i].ev_time))
-                    if (all_ev[i].ko_data !== q_items[s_sel][g][q_head[s_sel][g]].ko_data)
-                        `uvm_error("SCB", $sformatf("KO 数据不符（SBUF%0d 组%0d，@%0t）", s_sel, g, all_ev[i].ev_time))
-                        n_mismatch += (all_ev[i].sbuf !== g) +
-                            (all_ev[i].ko_data !== q_items[s_sel][g][q_head[s_sel][g]].ko_data);
+                    n_mismatch += (all_ev[i].sbuf !== g);
                 q_head[s_sel][g] = (q_head[s_sel][g] == MAXQ-1) ? 0 : q_head[s_sel][g] + 1;
                 q_cnt[s_sel][g] = q_cnt[s_sel][g] - 1;
                 i++;

@@ -114,9 +114,7 @@ class koa_x2x_seq extends uvm_sequence #(koa_item);
             end
             begin
                 koa_item it = koa_item::type_id::create("it");
-                it.randomize_payload(KO_CTRL);
                 it.pri = pri_arr[i];
-                it.ko_data = it.pack();
                 case (kind)
                     0: it.stream = ST_APS_EXT;
                     1: it.stream = ST_APS_INS;

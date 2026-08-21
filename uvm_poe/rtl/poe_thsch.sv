@@ -5,8 +5,8 @@
 //   永远进同一队列，队列 FIFO 保证线程内 burst 顺序（c_task 的 loc/free 配对
 //   依赖该顺序，跨队列交错会破坏 lock 先于 free 的执行序）
 // - 发射的 burst 写入 2 个 burst 队列（深度 QDEPTH），队列项携带：
-//   {pre, burst(32b), burst_ts, ts_idx(4b), th_id(6b)}（ts_idx 供 CU/dma 完成反馈归属）
-//   - burst：THM ready_burst（bs_pc 索引，32bit；burst_type 区分 i/v 与 c_task 字段）
+//   {pre, burst(38b), burst_ts, ts_idx(4b), th_id(6b)}（ts_idx 供 CU/dma 完成反馈归属）
+//   - burst：THM ready_burst（bs_pc 索引，38bit；burst_type 区分 i/v 与 c_task 字段）
 //   - burst_ts：发射时刻该 burst 所属 ts（THM ready_burst_ts）
 //   - pre：THM pre_read 插队注入的 burst（无线程归属，burst_sch 跳过 ts==cur_ts 检查）
 // - 插队注入接口：THM 的 pre_read 路径直接写一条 burst 进队列（q0 优先，满则 q1），
@@ -16,6 +16,7 @@ module poe_thsch #(
     parameter int QDEPTH = 8,
     parameter int TS_ID_W = 6
     ) (
+
     input logic clk,
     input logic rst_n,
     // ---- THM 侧 ----
@@ -23,7 +24,7 @@ module poe_thsch #(
     input logic [MAX_THREADS*3-1:0] ready_pri,
     input logic [MAX_THREADS*TS_ID_W-1:0] ready_burst_ts,
     input logic [MAX_THREADS*4-1:0] ready_burst_tidx, // 每线程当前发射 burst 的 ts 序号
-    input logic [MAX_THREADS*32-1:0] ready_burst,
+    input logic [MAX_THREADS*BURST_W-1:0] ready_burst,
     output logic iss_vld0,
     output logic [5:0] iss_tid0,
     output logic iss_vld1,
@@ -33,21 +34,23 @@ module poe_thsch #(
     output logic [5:0] q0_tid,
     output logic [TS_ID_W-1:0] q0_ts,
     output logic [3:0] q0_tidx,
-    output logic [31:0] q0_burst,
+    output logic [BURST_W-1:0] q0_burst,
     output logic q0_pre,
     input logic q0_ack,
     output logic q1_vld,
     output logic [5:0] q1_tid,
     output logic [TS_ID_W-1:0] q1_ts,
     output logic [3:0] q1_tidx,
-    output logic [31:0] q1_burst,
+    output logic [BURST_W-1:0] q1_burst,
     output logic q1_pre,
     input logic q1_ack
     );
 
+    import poe_types_pkg::*;
+
     localparam int PTR_W = $clog2(QDEPTH);
     // 队列项 {pre, burst, burst_ts, th_id}
-    localparam int QW = 1 + 32 + TS_ID_W + 4 + 6; // {pre, burst(32b), burst_ts, ts_idx, th_id}
+    localparam int QW = 1 + BURST_W + TS_ID_W + 4 + 6; // {pre, burst, burst_ts, ts_idx, th_id}
     logic [QW-1:0] q0_mem [QDEPTH];
     logic [PTR_W-1:0] q0_head, q0_tail;
     logic [PTR_W:0] q0_cnt;
@@ -117,14 +120,14 @@ module poe_thsch #(
             // 发射写队列（一级发射）
             if (q0_wr) begin
                 q0_mem[q0_tail] <= {1'b0,
-                ready_burst[tid0*32 +: 32],
+                ready_burst[tid0*BURST_W +: BURST_W],
                 ready_burst_ts[tid0*TS_ID_W +: TS_ID_W],
                 ready_burst_tidx[tid0*4 +: 4], tid0[5:0]};
                 q0_tail <= (q0_tail == QDEPTH-1) ? '0 : q0_tail + 1'b1;
             end
             if (q1_wr) begin
                 q1_mem[q1_tail] <= {1'b0,
-                ready_burst[tid1*32 +: 32],
+                ready_burst[tid1*BURST_W +: BURST_W],
                 ready_burst_ts[tid1*TS_ID_W +: TS_ID_W],
                 ready_burst_tidx[tid1*4 +: 4], tid1[5:0]};
                 q1_tail <= (q1_tail == QDEPTH-1) ? '0 : q1_tail + 1'b1;

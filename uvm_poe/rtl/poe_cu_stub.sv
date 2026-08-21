@@ -10,12 +10,14 @@ module poe_cu_stub #(
     input logic emit_cu_vld,
     input logic [5:0] emit_cu_tid,
     input logic [3:0] emit_cu_tidx,
-    input logic [31:0] emit_cu_burst,
+    input logic [BURST_W-1:0] emit_cu_burst,
     output logic cu_ack,
     output logic cu_done_vld,
     output logic [5:0] cu_done_tid,
     output logic [3:0] cu_done_tidx
     );
+
+    import poe_types_pkg::*;
 
     logic busy;
     logic [5:0] cur_tid;

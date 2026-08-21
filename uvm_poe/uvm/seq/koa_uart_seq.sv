@@ -27,10 +27,8 @@ class koa_uart_seq extends uvm_sequence #(koa_item);
             @(posedge cfg.vif.clk);
             if (($urandom % 1000) < pct) begin
                 koa_item it = koa_item::type_id::create("it");
-                it.randomize_payload(ko_tmpl_t'($urandom % 4)); // 随机模板报文
                 if (dir == 0)
                     it.pri = 3'd7; // UART_EXT：固定 7
-                it.ko_data = it.pack();
                 it.stream = (dir == 0) ? ST_UART_EXT : ST_UART_INS;
                 it.plane = 0;
                 start_item(it);

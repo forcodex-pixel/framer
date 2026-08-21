@@ -39,57 +39,51 @@ class koa_in_monitor extends uvm_monitor;
             for (int i = 0; i < n_oh; i++)
                 if (ko_pkg::g_tb_cfg.vif.oh_e_vld[i] && ko_pkg::g_tb_cfg.vif.oh_e_rdy[i])
                     sample(ST_OH_EXT, i, ko_pkg::g_tb_cfg.vif.oh_e_pri[i*3 +: 3],
-                    ko_pkg::g_tb_cfg.vif.oh_e_data[i*384 +: 384],
                     ko_pkg::g_tb_cfg.vif.oh_e_cid[i*17 +: 17],
                     ko_pkg::g_tb_cfg.vif.oh_e_pos[i*3 +: 3]);
             // OH_INS
             for (int i = 0; i < n_oh; i++)
                 if (ko_pkg::g_tb_cfg.vif.oh_i_vld[i] && ko_pkg::g_tb_cfg.vif.oh_i_rdy[i])
                     sample(ST_OH_INS, i, ko_pkg::g_tb_cfg.vif.oh_i_pri[i*3 +: 3],
-                    ko_pkg::g_tb_cfg.vif.oh_i_data[i*384 +: 384],
                     ko_pkg::g_tb_cfg.vif.oh_i_cid[i*17 +: 17],
                     ko_pkg::g_tb_cfg.vif.oh_i_pos[i*3 +: 3]);
             // APS_EXT
             for (int i = 0; i < n_x2x; i++)
                 if (ko_pkg::g_tb_cfg.vif.aps_e_vld[i] && ko_pkg::g_tb_cfg.vif.aps_e_rdy[i])
                     sample(ST_APS_EXT, i, ko_pkg::g_tb_cfg.vif.aps_e_pri[i*3 +: 3],
-                    ko_pkg::g_tb_cfg.vif.aps_e_data[i*384 +: 384],
                     ko_pkg::g_tb_cfg.vif.aps_e_cid[i*17 +: 17],
                     ko_pkg::g_tb_cfg.vif.aps_e_pos[i*3 +: 3]);
             // APS_INS
             for (int i = 0; i < n_x2x; i++)
                 if (ko_pkg::g_tb_cfg.vif.aps_i_vld[i] && ko_pkg::g_tb_cfg.vif.aps_i_rdy[i])
                     sample(ST_APS_INS, i, ko_pkg::g_tb_cfg.vif.aps_i_pri[i*3 +: 3],
-                    ko_pkg::g_tb_cfg.vif.aps_i_data[i*384 +: 384],
                     ko_pkg::g_tb_cfg.vif.aps_i_cid[i*17 +: 17],
                     ko_pkg::g_tb_cfg.vif.aps_i_pos[i*3 +: 3]);
             // ALM
             for (int i = 0; i < n_x2x; i++)
                 if (ko_pkg::g_tb_cfg.vif.alm_vld[i] && ko_pkg::g_tb_cfg.vif.alm_rdy[i])
                     sample(ST_ALM, i, ko_pkg::g_tb_cfg.vif.alm_pri[i*3 +: 3],
-                    ko_pkg::g_tb_cfg.vif.alm_data[i*384 +: 384],
                     ko_pkg::g_tb_cfg.vif.alm_cid[i*17 +: 17],
                     ko_pkg::g_tb_cfg.vif.alm_pos[i*3 +: 3]);
             // UART_EXT
             if (ko_pkg::g_tb_cfg.vif.u_e_vld && ko_pkg::g_tb_cfg.vif.u_e_rdy)
                 sample(ST_UART_EXT, 0, ko_pkg::g_tb_cfg.vif.u_e_pri,
-                ko_pkg::g_tb_cfg.vif.u_e_data, 17'd0, 3'd0);
+                17'd0, 3'd0);
             // UART_INS
             if (ko_pkg::g_tb_cfg.vif.u_i_vld && ko_pkg::g_tb_cfg.vif.u_i_rdy)
                 sample(ST_UART_INS, 0, ko_pkg::g_tb_cfg.vif.u_i_pri,
-                ko_pkg::g_tb_cfg.vif.u_i_data, 17'd0, 3'd0);
+                17'd0, 3'd0);
         end
     endtask
 
     function void sample(koa_stream_t s, int pl, logic [2:0] pri,
-        logic [383:0] data, logic [16:0] cid, logic [2:0] pos);
+        logic [16:0] cid, logic [2:0] pos);
         koa_item it = koa_item::type_id::create("it");
         it.stream = s;
         it.plane = pl;
         it.cid = cid;
         it.pos = pos;
         it.pri = pri;
-        it.ko_data = data;
         it.ev_time = $time; // 沿（active 区）采样，即 KOA 入队沿；out 用 $time-1 对齐
         it.is_out = 1'b0;
         ap.write(it);
@@ -117,7 +111,6 @@ class koa_out_monitor extends uvm_monitor;
                 it.ev_time = $time - 1; // 输出寄存器在沿更新，对齐 DUT 输出拍
                 it.is_out = 1'b1;
                 it.pri = ko_pkg::g_tb_cfg.vif.out_pri;
-                it.ko_data = ko_pkg::g_tb_cfg.vif.out_data;
                 ap.write(it);
             end
         end
