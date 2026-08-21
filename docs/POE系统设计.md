@@ -38,7 +38,7 @@ KOA（5×SBUF × 8 优先级段，SP+RR 调度）
 THM（线程池 64，保序 8 深缓存，模板池取线程描述）
    │  ready_mask/ready_burst（38bit）
    ▼
-th_sch（一级发射，tid 奇偶队列亲和，每拍 ≤2）
+th_sch（一级发射，全局 (pri,tid) 取前 2，动态 lane，每拍 ≤2）
    │  q0/q1 burst 队列（8 深）
    ▼
 burst_sch（二级发射，ts==cur_ts 等条件）
@@ -177,8 +177,11 @@ th_need[ts] / th_off / th_sel_ts / th_sel_idx`。
 
 ## 6. th_sch（一级发射）
 
-- 每拍按 `(pri, tid)` 选线程发射 ≤2 个；
-- **队列亲和**：tid 偶数 → q0、奇数 → q1（同线程 burst 保序）；
+- 每拍**全局**按 `(pri, tid)` 取前 2 个 READY 线程发射（无奇偶分组）；
+- **动态 lane**：线程首次发射时分配 q0/q1（轮转平衡），此后该线程 burst 固定进
+  同一 lane——队列 FIFO 保证线程内 burst 顺序（c_task loc/free 配对依赖，跨队列
+  交错会破坏 lock 先于 free 的执行序）；两 winner 默认分属不同队列，同 lane
+  冲突时只发高优先者（低者保持 READY，下一拍重选）；
 - 队列项：`{pre, burst(38), burst_ts(6), ts_idx(4), th_id(6)}`（55bit，8 深 ×2）；
 - 完成反馈携带 ts_idx（发射时随 burst 下发）。
 
