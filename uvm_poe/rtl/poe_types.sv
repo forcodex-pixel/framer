@@ -32,7 +32,7 @@ package poe_types_pkg;
         logic st; // 是否为所属 ts 的首个 burst
         logic tr; // 是否涉及 O 窗操作
         logic [2:0] ts_len; // 仅 i/v：所属 ts 包含 burst 数
-        logic branch; // 仅 i/v：是否可能存在 ts 跳转
+        logic branch; // 仅 i/v：预留（可能跳转）；真实跳转由模板 ts_id 不连续标记
         logic burst_type; // 0=i/v_task，1=c_task
         logic vld_cu; // 需执行 task 数：0=1 个，1=2 个
         logic [2:0] tsk_id0; // 仅 i/v：任务0 id，查 CSR.vtsk_c

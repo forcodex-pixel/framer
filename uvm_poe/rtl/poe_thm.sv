@@ -90,7 +90,7 @@ module poe_thm #(
     logic [TS_ID_W-1:0] th_ts_id_r [MAX_THREADS][MAX_TS]; // 每 ts 编号（递增可跳转）
     logic [7:0] th_wait [MAX_THREADS];
     logic [3:0] th_done_acc [MAX_THREADS][MAX_TS]; // 每 ts 已完成 burst 数（done 按发射序匹配）
-    logic [3:0] th_need [MAX_THREADS][MAX_TS]; // 每 ts 实际执行 burst 数（branch 提前后，≤8）
+    logic [3:0] th_need [MAX_THREADS][MAX_TS]; // 每 ts 实际执行 burst 数（= ts_bs，≤8）
     logic [7:0] th_off [MAX_THREADS][MAX_TS+1]; // 每 ts 起始累计偏移（off[k]=前 k 个 ts 的 need 和）
     logic [3:0] th_sel_ts [MAX_THREADS]; // bs_pc 所属 ts 序号（组合推导）
     logic [2:0] th_sel_idx [MAX_THREADS]; // bs_pc 在所属 ts 内的 burst 序号（组合推导）
@@ -264,7 +264,7 @@ module poe_thm #(
     end
 
     // ---- 每 ts 起始累计偏移（off[k] = 前 k 个 ts 的 need 和；bs_pc 只推进到需执行的
-    // burst，branch 截断的槽位不计入，映射与 th_burst_r 物理槽位一致）----
+    // burst，映射与 th_burst_r 物理槽位一致）----
     always_comb begin
         for (int i = 0; i < MAX_THREADS; i++) begin
             th_off[i][0] = 8'd0;
@@ -308,19 +308,6 @@ module poe_thm #(
         end
     end
 
-    // branch 等待随机上限：当拍 READY 线程中当前 burst 为 branch 的数量
-    int branch_cnt;
-    always_comb begin
-        burst_iv_t b;
-        branch_cnt = 0;
-        for (int i = 0; i < MAX_THREADS; i++) begin
-            if (th_state[i] == T_READY && th_bs_pc[i] < th_off[i][MAX_TS]) begin
-                b = th_burst_r[i][th_sel_ts[i]][th_sel_idx[i]];
-                if (!b.burst_type && b.branch)
-                    branch_cnt++;
-            end
-        end
-    end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -396,17 +383,9 @@ module poe_thm #(
                     th_pri_r[t] <= pr;
                     for (int k = 0; k < MAX_TS; k++)
                         th_ts_id_r[t][k] <= tid_vec[k*TS_ID_W +: TS_ID_W];
-                    // 每 ts 独立：实际条数 = bs[k]（首个 branch 提前结束）
+                    // 每 ts 独立：实际条数 = bs[k]（br 字段为预留，不截断）
                     for (int k = 0; k < MAX_TS; k++) begin
                         automatic int need_k = bs[k*4 +: 4];
-                        automatic burst_iv_t tmp_b;
-                        for (int m = 0; m < MAX_BURST; m++) begin
-                            tmp_b = bp[(k*MAX_BURST + m)*BURST_W +: BURST_W];
-                            if (!tmp_b.burst_type && tmp_b.branch && m < need_k) begin
-                                need_k = m + 1;
-                                break;
-                            end
-                        end
                         th_need[t][k] <= need_k[3:0];
                         for (int m = 0; m < MAX_BURST; m++)
                             th_burst_r[t][k][m] <=
@@ -446,7 +425,7 @@ module poe_thm #(
                 buf_tail <= (buf_tail == BUF_DEPTH-1) ? '0 : buf_tail + 1'b1;
                 buf_cnt <= buf_cnt + 1'b1;
             end
-            // ---- th_sch 一级发射：进入 ISSUED 并打拍（非 branch 1 拍，branch 1+3+t 拍） ----
+            // ---- th_sch 一级发射：进入 ISSUED 并打拍（发射后 1 拍） ----
             if (iss_vld0 && th_state[iss_tid0] == T_READY &&
             th_bs_pc[iss_tid0] < th_off[iss_tid0][th_ts_n[iss_tid0]]) begin
                 burst_iv_t biv;
@@ -457,10 +436,7 @@ module poe_thm #(
                 if (biv.st && biv.lock_req &&
                     lock_owner[biv.lock_id] == LOCK_FREE)
                     lock_owner[biv.lock_id] <= iss_tid0;
-                if (!biv.burst_type && biv.branch)
-                    th_wait[iss_tid0] <= 4 + ($urandom % (branch_cnt + 1)); // 1 + 3 + t
-                else
-                    th_wait[iss_tid0] <= 8'd1; // 1 拍
+                th_wait[iss_tid0] <= 8'd1; // 发射后 1 拍进入下一 burst
             end
             if (iss_vld1 && th_state[iss_tid1] == T_READY &&
             th_bs_pc[iss_tid1] < th_off[iss_tid1][th_ts_n[iss_tid1]]) begin
@@ -475,10 +451,7 @@ module poe_thm #(
                     !(iss_vld0 && biv0.st && biv0.lock_req &&
                       biv0.lock_id == biv.lock_id))
                     lock_owner[biv.lock_id] <= iss_tid1; // 与 iss0 同锁时让 iss0 先占
-                if (!biv.burst_type && biv.branch)
-                    th_wait[iss_tid1] <= 4 + ($urandom % (branch_cnt + 1));
-                else
-                    th_wait[iss_tid1] <= 8'd1;
+                th_wait[iss_tid1] <= 8'd1;
             end
             // ---- ISSUED 打拍推进 bs_pc（跨 ts 连续，burst 队列允许超前 ts） ----
             for (int i = 0; i < MAX_THREADS; i++) begin

@@ -54,7 +54,7 @@ burst_sch（二级发射：q0→EU0 / q1→EU1 各自按优先级选；4 个 DSE
 
 | 字段 | 位宽 | 含义 |
 | --- | --- | --- |
-| pri | 3bit | 调度优先级（0 最高），决定 KOA 段号 |
+| pri |3bit | 调度优先级（0 最高），决定 KOA 段号 |
 | stream | 3bit | 来源流 0..6（保序键之一） |
 | cid | 17bit | 通道号（1 时隙粒度，保序键之二） |
 | pos | 3bit | 开销位置（保序键之三） |
@@ -72,7 +72,7 @@ burst_sch（二级发射：q0→EU0 / q1→EU1 各自按优先级选；4 个 DSE
 | st | 1bit | 是否为所属 ts 首个 burst |
 | tr | 1bit | 是否涉及 O 窗操作 |
 | ts_len / rev | 3bit / 4bit | i/v 所属 ts burst 数 / c 保留 |
-| branch | 1bit | 仅 i/v：是否可能 ts 跳转 |
+| branch | 1bit | 仅 i/v：预留（可能跳转）；真实跳转由模板 ts_id 不连续标记 |
 | burst_type / vld_cu | 1bit ×2 | 类型 / 需执行 task 数 |
 | tsk_id / dma_id | 3bit ×2 | 任务 id（查 CSR.vtsk_c / dma_c） |
 | c0 / c1 | 1bit ×2 | 任务有效标志 |

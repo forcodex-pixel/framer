@@ -13,7 +13,7 @@
 //   dma_c       CSR dma_c：c_task 执行指示（8bit 掩码，对应 cw 8 项）
 //   cw          CSR cw：c_task 操作表（8×6B，条目 48bit）
 //
-// 模板覆盖场景：短 i/v、混合 i/v+c_task、长线程+branch 跳转、DMA 密集、
+// 模板覆盖场景：短 i/v、混合 i/v+c_task、长线程+ts_id 跳变、DMA 密集、
 // 单段持锁、双段持锁（ts 级互斥锁：lock_req/unlock_req 仅 ts 首个 burst 生效）。
 // ============================================================================
 package poe_thread_tpl_pkg;
@@ -178,7 +178,7 @@ package poe_thread_tpl_pkg;
         tpl_mix_1pair = t;
     endfunction
 
-    // ---- T2：长线程 + branch 跳转（8 ts，1 对共享 c_task，ts 编号跳转） ----
+    // ---- T2：长线程 + ts_id 跳变（8 ts，1 对 c_task） ----
     function automatic thread_tpl_t tpl_long_branch();
         thread_tpl_t t;
         automatic logic [19:0] tg;
@@ -395,7 +395,7 @@ package poe_thread_tpl_pkg;
         tpl_hp_c = t;
     endfunction
 
-    // ---- T7：i/v 密集（16 ts，每 ts 8 i/v burst，奇数 ts 第 6 条 branch，EU/队列高压力） ----
+    // ---- T7：i/v 密集（16 ts，每 ts 8 i/v，奇数 ts 第 6 条 br（预留），其后 ts_id 跳变） ----
     function automatic thread_tpl_t tpl_hp_iv();
         thread_tpl_t t;
         t = '0;
@@ -403,7 +403,8 @@ package poe_thread_tpl_pkg;
         t.pri = 3'd1;
         t.ts_bs[3:0] = 4'd1;
         for (int k = 1; k < 16; k++) t.ts_bs[k*4 +: 4] = 4'd8;
-        for (int k = 0; k < 16; k++) t.ts_id[k*6 +: 6] = k[5:0];
+        // ts_id 跳变：奇数 ts 带 br，其后 ts_id 不连续（真实跳转标记）
+        for (int k = 0; k < 16; k++) t.ts_id[k*6 +: 6] = (k + (k >> 1)) & 6'h3F;
         tpl_put_ts8(t, 0, tpl_iv(1'b1, 3'd1, 1'b0, 1'b0, 3'd0),
                     '0, '0, '0, '0, '0, '0, '0);
         for (int k = 1; k < 16; k++)
