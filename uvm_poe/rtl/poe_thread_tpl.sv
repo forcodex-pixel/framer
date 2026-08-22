@@ -212,39 +212,39 @@ package poe_thread_tpl_pkg;
         tpl_long_branch = t;
     endfunction
 
-    // ---- T3：DMA 密集线程（7 ts，3 对 c_task，每对 loc/free 分处相邻 ts） ----
+    // ---- T3：DMA 密集线程（6 ts，3 对 c_task） ----
+    // 仅同配对的 loc/free 分处不同 ts（pair3：loc dma4→ts4、free dma5→ts5）；
+    // 不同配对可同 ts（ts4 含 pair2 的 free dma3 与 pair3 的 loc dma4，无依赖）
     function automatic thread_tpl_t tpl_dma_dense();
         thread_tpl_t t;
         t = '0;
-        t.ts_cnt = 5'd7;
+        t.ts_cnt = 5'd6;
         t.pri = 3'd0;
         t.ts_bs[2:0] = 3'd1;
         t.ts_bs[5:3] = 3'd2;
         t.ts_bs[8:6] = 3'd2;
         t.ts_bs[11:9] = 3'd2;
-        t.ts_bs[14:12] = 3'd2;
+        t.ts_bs[14:12] = 3'd3;
         t.ts_bs[17:15] = 3'd2;
-        t.ts_bs[20:18] = 3'd2;
         t.ts_id[5:0] = 6'd0;
         t.ts_id[11:6] = 6'd1;
         t.ts_id[17:12] = 6'd2;
         t.ts_id[23:18] = 6'd3;
         t.ts_id[29:24] = 6'd4;
         t.ts_id[35:30] = 6'd5;
-        t.ts_id[41:36] = 6'd6;
         tpl_put_ts(t, 0, tpl_iv(1'b1, 3'd1, 1'b0, 1'b0, 3'd0), '0, '0, '0);
-        // 配对 1（dma0/1）、配对 2（dma2/3）、配对 3（dma4/5），loc/free 分处相邻 ts
+        // 配对 1（dma0/1）、配对 2（dma2/3）、配对 3（dma4/5）
         tpl_put_ts(t, 1, tpl_iv(1'b1, 3'd2, 1'b0, 1'b0, 3'd1),
                         tpl_c(1'b0, 3'd0, 8'd4), '0, '0); // loc dma0
         tpl_put_ts(t, 2, tpl_iv(1'b1, 3'd2, 1'b0, 1'b0, 3'd2),
                         tpl_c(1'b0, 3'd1, 8'd4), '0, '0); // free dma1
         tpl_put_ts(t, 3, tpl_iv(1'b1, 3'd2, 1'b0, 1'b0, 3'd3),
                         tpl_c(1'b0, 3'd2, 8'd4), '0, '0); // loc dma2
-        tpl_put_ts(t, 4, tpl_iv(1'b1, 3'd2, 1'b0, 1'b0, 3'd4),
-                        tpl_c(1'b0, 3'd3, 8'd4), '0, '0); // free dma3
+        // ts4：free dma3（pair2）+ loc dma4（pair3）——不同配对同 ts，无依赖
+        tpl_put_ts(t, 4, tpl_iv(1'b1, 3'd3, 1'b0, 1'b0, 3'd4),
+                        tpl_c(1'b0, 3'd3, 8'd4), // free dma3
+                        tpl_c(1'b0, 3'd4, 8'd4), '0); // loc dma4
         tpl_put_ts(t, 5, tpl_iv(1'b1, 3'd2, 1'b0, 1'b0, 3'd5),
-                        tpl_c(1'b0, 3'd4, 8'd4), '0, '0); // loc dma4
-        tpl_put_ts(t, 6, tpl_iv(1'b1, 3'd2, 1'b0, 1'b0, 3'd6),
                         tpl_c(1'b0, 3'd5, 8'd4), '0, '0); // free dma5
         t.vtsk_c = 8'hFF;
         t.dma_c = 8'h3F; // dma0..5 有效
