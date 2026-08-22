@@ -38,15 +38,15 @@ KOA（5×SBUF × 8 优先级段，SP+RR 调度）
 THM（线程池 64，保序 8 深缓存，模板池取线程描述）
    │  ready_mask/ready_burst（38bit）
    ▼
-th_sch（一级发射，全局 (pri,tid) 取前 2，每拍 ≤2）
-   │  q0/q1 burst 队列（8 深）
+th_sch（一级发射，全局 (pri,tid) 取前 2；q0/q1 仅存 i/v，c_task 解析入独立缓存）
+   │  q0/q1 i/v 槽池（8×2）+ c_task 缓存（16）
    ▼
-burst_sch（二级发射，ts==cur_ts 等条件）
-   ├─ i/v_task → CU0/CU1（计算桩）→ cu_done
-   └─ c_task  → dma_ctrl（loc=RBA读 / free=RBA写，C 窗纯数据存储）→ dma_done
+burst_sch（二级发射：q0→EU0 / q1→EU1 各自按优先级选；4 个 DSE 调度器选 c_task）
+   ├─ i/v burst → EU0/EU1（各含 4 个 CU 桩，≤2 task 分发给 2 个）→ eu_done
+   └─ c_task   → dma_ctrl ×4（每 DSE 1 个，loc=RBA读 / free=RBA写）→ dma_done
 ```
 
-完成反馈（cu_done / dma_done）携带 ts 序号回 THM，驱动 `cur_ts` 推进与锁释放。
+完成反馈（eu_done / dma_done）携带 ts 序号回 THM，驱动 `cur_ts` 推进与锁释放。
 
 ## 3. 数据结构
 
@@ -183,35 +183,38 @@ th_need[ts] / th_off / th_sel_ts / th_sel_idx`。
 ## 6. th_sch（一级发射）
 
 - 每拍**全局**按 `(pri, tid)` 取前 2 个 READY 线程发射（无奇偶分组）；
-- 路由：winner0 → q0、winner1 → q1（各受队列满反压），**不做线程固定 lane**；
-  线程内 burst 顺序由 ts 机制保证：同一配对（同 tag/同锁）的 loc/free 分处
-  不同 ts，burst_sch 按 `ts == cur_ts` 发射，free 必然在 loc 完成后才放行；
-  不同锁/不同 tag 的 loc/free 相互独立，无先后要求；
-- 队列项：`{pre, burst(38), burst_ts(6), ts_idx(4), th_id(6)}`（55bit，8 深 ×2）；
+- **队列拆分**：q0/q1（8 深槽池）仅存放 i/v burst（槽项含优先级，供无头阻调度）；
+  c_task burst 解析出有效 c_task（c0/c1 + dma_c 判有效、cw 解析 tag/op），
+  存入独立 c_task 缓存（16 深槽池），满则反压 c_task 发射；
+- 槽池无先后关系：二级发射按优先级选任意有效槽，ack 逐槽清空；
 - 完成反馈携带 ts_idx（发射时随 burst 下发）。
 
 ## 7. burst_sch（二级发射）
 
-从 q0/q1 各自独立判断队头可发射，每拍 ≤2：
+**无头阻**：槽池无 FIFO/先后关系，调度器按优先级选任意有效槽（每拍各 ≤1）。
 
-- 公共条件：`ts == 线程当前 cur_ts`（pre 插队跳过）、非 O 窗反压；
-  依赖 burst 分处不同 ts，该条件保证 loc/free 等先后顺序；
-- c_task 附加：无需资源预检/冲突检查——C 窗每线程独享且无 loc/free 生命周期，
-  同地址互斥由 THM 锁在一级发射保证，只要满足公共条件即放行；
-- 路由：i/v → CU0/CU1；c_task → dma_ctrl（dma 单路，双 c_task 同拍只发 q0）。
+- **i/v**：q0 → EU0、q1 → EU1 各自独立调度，每拍最多 2 个；
+  可发射条件：`ts == 线程当前 cur_ts`（pre 槽跳过）、非 O 窗反压；
+- **c_task**：4 个独立 DSE 调度器（DSE 0..3，DSE==tag），各从 c_task 缓存按
+  优先级选 `tag==DSE` 且 `ts == cur_ts` 的最高优先项，每拍最多 4 个
+  （每 DSE 1 个）；`ts==cur_ts` 保证同配对 loc/free 的先后顺序；
+- 无需资源预检/冲突检查：同地址互斥由 THM 锁在一级发射保证。
 
 ## 8. CU / EU
 
-- 双 CU 桩（LATENCY=1）：接收 i/v burst，延迟后回 `cu_done{vld, tid, ts_idx}`；
+- 2 个 EU 桩，每个内含 4 个 CU 桩（task0→CU0、task1→CU1，CU2/CU3 预留）：
+  接收 i/v burst，≤2 个 task 分发给 CU 桩执行（LATENCY=1），
+  全部完成后聚合回 1 个 `eu_done{vld, tid, ts_idx}`（按 burst 计）；
 - 真实 CU 语义（按 tsk_id 查 vtsk_c、按 sub_pc 取子指令）为后续细化项。
 
 ## 9. dma_ctrl（c_task / C 窗）
 
 ### 9.1 定位
 
-执行 c_task（loc= RBA 读 / free= RBA 写），C 窗为每线程独享的纯数据存储
-（只存 c_line）。同地址互斥由 THM 锁在一级发射保证，dma_ctrl 不再做任何
-tag 相同/冲突检查，也不回写 CSR.cw。
+4 个独立单元（每 DSE 1 个），各执行单 c_task（loc= RBA 读 / free= RBA 写），
+C 窗为每线程独享的纯数据存储（只存 c_line）。解析已在 th_sch 完成
+（tid/tidx/dma_id/tag/op），本单元只执行；同地址互斥由 THM 锁在一级发射
+保证，不再做任何 tag 相同/冲突检查，也不回写 CSR.cw。
 
 ### 9.2 loc（0）
 
@@ -226,9 +229,9 @@ tag 相同/冲突检查，也不回写 CSR.cw。
 ### 9.4 状态机
 
 ```text
-IDLE → LOAD（拆任务）
-  loc  → RBA_RD → RBA_RD_DONE(回填 c_line) → NEXT
-  free → FREE_RBA(写SMC) → NEXT
+IDLE（单 c_task）
+  loc  → RBA_RD → RBA_RD_DONE(回填 c_line) → DONE
+  free → FREE_RBA(写SMC) → DONE
 → DONE（回 dma_done{tid, ts_idx}）→ IDLE
 ```
 
@@ -247,6 +250,9 @@ IDLE → LOAD（拆任务）
 | --- | --- |
 | 线程池 / 保序缓存 | 64 / 8 深 |
 | ts / burst 上限 | 16 / 4 |
+| i/v 槽池（q0/q1） | 8 深 ×2（槽项含 pri） |
+| c_task 缓存 | 16 深（解析后的单 task：pri/tid/tidx/ts/dma_id/tag/op） |
+| 执行单元 | EU ×2（各 4 个 CU 桩）+ dma_ctrl ×4（每 DSE 1 个） |
 | burst 位宽 | 38bit |
 | 锁表 | 16 × 6bit |
 | C 窗 | 每线程独享 8 位置（64×8，纯数据存储，无 loc/free 生命周期） |

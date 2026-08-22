@@ -143,6 +143,7 @@ package poe_thread_tpl_pkg;
     // ---- T1：混合线程（4 ts，1 对共享 c_task loc/free，无锁） ----
     function automatic thread_tpl_t tpl_mix_1pair();
         thread_tpl_t t;
+        automatic logic [19:0] tg;
         t = '0;
         t.ts_cnt = 5'd4;
         t.pri = 3'd2;
@@ -163,14 +164,16 @@ package poe_thread_tpl_pkg;
         t.vtsk_c = 8'hFF;
         t.dma_c = 8'h30; // dma4/5 有效
         t.cw = {6{48'd0}};
-        t.cw[239:192] = tpl_cw_entry(20'h1_0001, 1'b0); // cw[4] loc tag
-        t.cw[287:240] = tpl_cw_entry(20'h1_0001, 1'b1); // cw[5] free tag
+        tg = $urandom % 4; // tag/DSE 0..3 随机（配对同 tag）
+        t.cw[239:192] = tpl_cw_entry(tg, 1'b0); // cw[4] loc
+        t.cw[287:240] = tpl_cw_entry(tg, 1'b1); // cw[5] free
         tpl_mix_1pair = t;
     endfunction
 
     // ---- T2：长线程 + branch 跳转（8 ts，1 对共享 c_task，ts 编号跳转） ----
     function automatic thread_tpl_t tpl_long_branch();
         thread_tpl_t t;
+        automatic logic [19:0] tg;
         t = '0;
         t.ts_cnt = 5'd8;
         t.pri = 3'd3;
@@ -207,8 +210,9 @@ package poe_thread_tpl_pkg;
         t.vtsk_c = 8'hFF;
         t.dma_c = 8'h30;
         t.cw = {6{48'd0}};
-        t.cw[239:192] = tpl_cw_entry(20'h2_0002, 1'b0); // cw[4] loc
-        t.cw[287:240] = tpl_cw_entry(20'h2_0002, 1'b1); // cw[5] free
+        tg = $urandom % 4;
+        t.cw[239:192] = tpl_cw_entry(tg, 1'b0); // cw[4] loc
+        t.cw[287:240] = tpl_cw_entry(tg, 1'b1); // cw[5] free
         tpl_long_branch = t;
     endfunction
 
@@ -217,6 +221,7 @@ package poe_thread_tpl_pkg;
     // 不同配对可同 ts（ts4 含 pair2 的 free dma3 与 pair3 的 loc dma4，无依赖）
     function automatic thread_tpl_t tpl_dma_dense();
         thread_tpl_t t;
+        automatic logic [19:0] tg;
         t = '0;
         t.ts_cnt = 5'd6;
         t.pri = 3'd0;
@@ -249,12 +254,15 @@ package poe_thread_tpl_pkg;
         t.vtsk_c = 8'hFF;
         t.dma_c = 8'h3F; // dma0..5 有效
         t.cw = '0;
-        t.cw[47:0] = tpl_cw_entry(20'h3_0003, 1'b0); // cw[0] loc
-        t.cw[95:48] = tpl_cw_entry(20'h3_0003, 1'b1); // cw[1] free
-        t.cw[143:96] = tpl_cw_entry(20'h3_0004, 1'b0); // cw[2] loc
-        t.cw[191:144] = tpl_cw_entry(20'h3_0004, 1'b1); // cw[3] free
-        t.cw[239:192] = tpl_cw_entry(20'h3_0005, 1'b0); // cw[4] loc
-        t.cw[287:240] = tpl_cw_entry(20'h3_0005, 1'b1); // cw[5] free
+        tg = $urandom % 4; // 配对 1
+        t.cw[47:0] = tpl_cw_entry(tg, 1'b0); // cw[0] loc
+        t.cw[95:48] = tpl_cw_entry(tg, 1'b1); // cw[1] free
+        tg = $urandom % 4; // 配对 2
+        t.cw[143:96] = tpl_cw_entry(tg, 1'b0); // cw[2] loc
+        t.cw[191:144] = tpl_cw_entry(tg, 1'b1); // cw[3] free
+        tg = $urandom % 4; // 配对 3
+        t.cw[239:192] = tpl_cw_entry(tg, 1'b0); // cw[4] loc
+        t.cw[287:240] = tpl_cw_entry(tg, 1'b1); // cw[5] free
         tpl_dma_dense = t;
     endfunction
 
@@ -262,6 +270,7 @@ package poe_thread_tpl_pkg;
     function automatic thread_tpl_t tpl_locked();
         thread_tpl_t t;
         automatic logic [BURST_W-1:0] b;
+        automatic logic [19:0] tg;
         t = '0;
         t.ts_cnt = 5'd5;
         t.pri = 3'd2;
@@ -289,8 +298,9 @@ package poe_thread_tpl_pkg;
         t.vtsk_c = 8'hFF;
         t.dma_c = 8'h30;
         t.cw = {6{48'd0}};
-        t.cw[239:192] = tpl_cw_entry(20'h4_0004, 1'b0); // cw[4] loc
-        t.cw[287:240] = tpl_cw_entry(20'h4_0004, 1'b1); // cw[5] free
+        tg = $urandom % 4;
+        t.cw[239:192] = tpl_cw_entry(tg, 1'b0); // cw[4] loc
+        t.cw[287:240] = tpl_cw_entry(tg, 1'b1); // cw[5] free
         tpl_locked = t;
     endfunction
 
@@ -298,6 +308,7 @@ package poe_thread_tpl_pkg;
     function automatic thread_tpl_t tpl_double_lock();
         thread_tpl_t t;
         automatic logic [BURST_W-1:0] b;
+        automatic logic [19:0] tg;
         t = '0;
         t.ts_cnt = 5'd7;
         t.pri = 3'd4;
@@ -332,8 +343,9 @@ package poe_thread_tpl_pkg;
         t.vtsk_c = 8'hFF;
         t.dma_c = 8'h30;
         t.cw = {6{48'd0}};
-        t.cw[239:192] = tpl_cw_entry(20'h5_0005, 1'b0); // cw[4] loc
-        t.cw[287:240] = tpl_cw_entry(20'h5_0005, 1'b1); // cw[5] free
+        tg = $urandom % 4;
+        t.cw[239:192] = tpl_cw_entry(tg, 1'b0); // cw[4] loc
+        t.cw[287:240] = tpl_cw_entry(tg, 1'b1); // cw[5] free
         tpl_double_lock = t;
     endfunction
 

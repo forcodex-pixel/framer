@@ -12,8 +12,9 @@ framer/
 
 ## 主工程：uvm_poe
 
-KOA 8 组 RR+SP 调度 → POE THM（线程管理/保序/CSR）→ th_sch（一级发射）→
-burst_sch（二级发射，i/v→CU，c_task→dma_ctrl）→ CU/EU 桩 + dma_ctrl（C 窗每线程独享 8 位置）。
+KOA 8 组 RR+SP 调度 → POE THM（线程管理/保序/CSR/锁）→ th_sch（一级发射：
+q0/q1 仅存 i/v，c_task 解析入独立缓存）→ burst_sch（二级发射：q0→EU0、q1→EU1，
+4 个 DSE 调度器选 c_task）→ EU×2（各 4 个 CU 桩）+ dma_ctrl×4（C 窗每线程独享 8 位置）。
 
 运行：
 

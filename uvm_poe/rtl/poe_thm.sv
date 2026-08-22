@@ -44,16 +44,16 @@ module poe_thm #(
     input logic [5:0] iss_tid0,
     input logic iss_vld1,
     input logic [5:0] iss_tid1,
-    // ---- CU（2 单元）/ dma_ctrl 完成：cur_ts 推进依赖完成统计 ----
-    input logic cu_done_vld0,
-    input logic [5:0] cu_done_tid0,
-    input logic [3:0] cu_done_tidx0,
-    input logic cu_done_vld1,
-    input logic [5:0] cu_done_tid1,
-    input logic [3:0] cu_done_tidx1,
-    input logic dma_done_vld,
-    input logic [5:0] dma_done_tid,
-    input logic [3:0] dma_done_tidx,
+    // ---- EU（2 个）/ dma_ctrl（4 个 DSE 单元）完成：cur_ts 推进依赖完成统计 ----
+    input logic eu_done_vld0,
+    input logic [5:0] eu_done_tid0,
+    input logic [3:0] eu_done_tidx0,
+    input logic eu_done_vld1,
+    input logic [5:0] eu_done_tid1,
+    input logic [3:0] eu_done_tidx1,
+    input logic [3:0] dma_done_vld, // 4 个 DSE 单元
+    input logic [23:0] dma_done_tid, // 4×6
+    input logic [15:0] dma_done_tidx, // 4×4
     // ---- burst_sch 二级发射通知（打拍起点，占位） ----
     input logic emit_vld,
     input logic [5:0] emit_tid,
@@ -210,52 +210,57 @@ module poe_thm #(
         end
     end
 
-    // ---- 完成事件聚合：cu0/cu1/dma 三路 done 按 tid 合并（同 tid 同拍累加） ----
-    logic [1:0] done_n; // 本拍 done 事件数（0..3）
-    logic [5:0] done_tid_l [3];
-    logic [3:0] done_tidx_l [3];
-    logic [1:0] done_cnt_l [3];
+    // ---- 完成事件聚合：eu0/eu1/dma0..3 六路 done 按 (tid,tidx) 合并（同 tid 同拍累加） ----
+    logic [2:0] done_n; // 本拍 done 事件数（0..6）
+    logic [5:0] done_tid_l [6];
+    logic [3:0] done_tidx_l [6];
+    logic [1:0] done_cnt_l [6];
     always_comb begin
-        done_n = 2'd0;
-        if (cu_done_vld0) begin
+        done_n = 3'd0;
+        if (eu_done_vld0) begin
             automatic int f = -1;
-            for (int k = 0; k < 3; k++)
-                if ((k < done_n) && (done_tid_l[k] == cu_done_tid0) &&
-                    (done_tidx_l[k] == cu_done_tidx0)) f = k;
+            for (int k = 0; k < 6; k++)
+                if ((k < done_n) && (done_tid_l[k] == eu_done_tid0) &&
+                    (done_tidx_l[k] == eu_done_tidx0)) f = k;
             if (f >= 0) done_cnt_l[f] = done_cnt_l[f] + 1'b1;
             else begin
-                done_tid_l[done_n] = cu_done_tid0;
-                done_tidx_l[done_n] = cu_done_tidx0;
+                done_tid_l[done_n] = eu_done_tid0;
+                done_tidx_l[done_n] = eu_done_tidx0;
                 done_cnt_l[done_n] = 2'd1;
                 done_n = done_n + 1'b1;
             end
         end
-        if (cu_done_vld1) begin
+        if (eu_done_vld1) begin
             automatic int f = -1;
-            for (int k = 0; k < 3; k++)
-                if ((k < done_n) && (done_tid_l[k] == cu_done_tid1) &&
-                    (done_tidx_l[k] == cu_done_tidx1)) f = k;
+            for (int k = 0; k < 6; k++)
+                if ((k < done_n) && (done_tid_l[k] == eu_done_tid1) &&
+                    (done_tidx_l[k] == eu_done_tidx1)) f = k;
             if (f >= 0) done_cnt_l[f] = done_cnt_l[f] + 1'b1;
             else begin
-                done_tid_l[done_n] = cu_done_tid1;
-                done_tidx_l[done_n] = cu_done_tidx1;
+                done_tid_l[done_n] = eu_done_tid1;
+                done_tidx_l[done_n] = eu_done_tidx1;
                 done_cnt_l[done_n] = 2'd1;
                 done_n = done_n + 1'b1;
             end
         end
-        if (dma_done_vld && (dma_done_tid < MAX_THREADS)) begin
-            automatic int f = -1;
-            for (int k = 0; k < 3; k++)
-                if ((k < done_n) && (done_tid_l[k] == dma_done_tid) &&
-                    (done_tidx_l[k] == dma_done_tidx)) f = k;
-            if (f >= 0) done_cnt_l[f] = done_cnt_l[f] + 1'b1;
-            else begin
-                done_tid_l[done_n] = dma_done_tid;
-                done_tidx_l[done_n] = dma_done_tidx;
-                done_cnt_l[done_n] = 2'd1;
-                done_n = done_n + 1'b1;
+        for (int d = 0; d < 4; d++)
+            if (dma_done_vld[d]) begin
+                automatic logic [5:0] dt = dma_done_tid[d*6 +: 6];
+                automatic logic [3:0] dti = dma_done_tidx[d*4 +: 4];
+                if (dt < MAX_THREADS) begin
+                    automatic int f = -1;
+                    for (int k = 0; k < 6; k++)
+                        if ((k < done_n) && (done_tid_l[k] == dt) &&
+                            (done_tidx_l[k] == dti)) f = k;
+                    if (f >= 0) done_cnt_l[f] = done_cnt_l[f] + 1'b1;
+                    else begin
+                        done_tid_l[done_n] = dt;
+                        done_tidx_l[done_n] = dti;
+                        done_cnt_l[done_n] = 2'd1;
+                        done_n = done_n + 1'b1;
+                    end
+                end
             end
-        end
     end
 
     // ---- 每 ts 起始累计偏移（off[k] = 前 k 个 ts 的 need 和；bs_pc 只推进到需执行的
@@ -488,7 +493,7 @@ module poe_thm #(
                 end
             end
             // ---- 完成推进：cu0/cu1/dma 三路 done 聚合后逐事件推进（支持同 tid 多 done、跨 ts） ----
-            for (int u = 0; u < 3; u++) begin
+            for (int u = 0; u < 6; u++) begin
                 if (u < done_n) begin
                     automatic logic [5:0] dt = done_tid_l[u];
                     if (th_state[dt] != T_IDLE && th_state[dt] != T_DONE) begin

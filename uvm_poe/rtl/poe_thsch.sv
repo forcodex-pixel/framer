@@ -3,22 +3,18 @@
 //   同优先级按 tid 小者优先；**全局取前 2 名**（无奇偶分组）
 // - 同拍互斥：两 winner 若同为 ts 首个 loc burst（st=1 && lock_req）且 lock_id 相同，
 //   只发高优先者，次者保持 READY 下拍重选（锁仅作用于一级发射阻塞）
-// - 路由：winner0 → q0、winner1 → q1（各受队列满反压），不做线程固定 lane；
-//   线程内 burst 顺序由 ts 机制保证：同一配对（同 tag/同锁）的 loc/free 有先后
-//   依赖，分处不同 ts，burst_sch 按 `ts == cur_ts` 发射，free 必然在 loc 完成后
-//   才放行；不同锁/不同 tag 的 loc/free 相互独立，无先后要求
-// - 发射的 burst 写入 2 个 burst 队列（深度 QDEPTH），队列项携带：
-//   {pre, burst(38b), burst_ts, ts_idx(4b), th_id(6b)}（ts_idx 供 CU/dma 完成反馈归属）
-//   - burst：THM ready_burst（bs_pc 索引，38bit；burst_type 区分 i/v 与 c_task 字段）
-//   - burst_ts：发射时刻该 burst 所属 ts（THM ready_burst_ts）
-//   - pre：预留插队标志（当前 pre_read 走 burst_sch 独立预读缓存，不经本队列）
-// - 队列未满才发射（写侧反压）；读侧 vld/ack 接口供 burst_sch 取
+// - 队列拆分：
+//   * q0/q1（8 深槽池）仅存放 i/v burst，项含优先级，供 burst_sch 无头阻按优先级调度；
+//   * c_task burst 解析出有效 c_task（c0/c1 + CSR.dma_c 判有效，CSR.cw 解析 tag/op），
+//     存入独立 c_task 缓存（16 深槽池，按优先级调度；满则反压 c_task 发射）；
+//     空 c_task burst（无有效任务）推 1 个占位 task，保证 dma 回 done（THM cur_ts 依赖）
+// - 槽池无先后关系：调度器按优先级选任意有效槽，ack 逐槽清空
 module poe_thsch #(
     parameter int MAX_THREADS = 64,
     parameter int QDEPTH = 8,
+    parameter int CT_DEPTH = 16,
     parameter int TS_ID_W = 6
     ) (
-
     input logic clk,
     input logic rst_n,
     // ---- THM 侧 ----
@@ -31,38 +27,72 @@ module poe_thsch #(
     output logic [5:0] iss_tid0,
     output logic iss_vld1,
     output logic [5:0] iss_tid1,
-    // ---- burst_sch 侧（2 个 burst 队列读侧） ----
-    output logic q0_vld,
-    output logic [5:0] q0_tid,
-    output logic [TS_ID_W-1:0] q0_ts,
-    output logic [3:0] q0_tidx,
-    output logic [BURST_W-1:0] q0_burst,
-    output logic q0_pre,
-    input logic q0_ack,
-    output logic q1_vld,
-    output logic [5:0] q1_tid,
-    output logic [TS_ID_W-1:0] q1_ts,
-    output logic [3:0] q1_tidx,
-    output logic [BURST_W-1:0] q1_burst,
-    output logic q1_pre,
-    input logic q1_ack
+    // ---- CSR（解析 c_task 用）：dma_c 任务掩码 / cw 操作表 ----
+    input logic [MAX_THREADS*8-1:0] csr_dma_c,
+    input logic [MAX_THREADS*384-1:0] csr_cw,
+    // ---- burst_sch 读侧：q0/q1 i/v 槽池（每槽一份扁平视图） ----
+    output logic [QDEPTH-1:0] q0_vld,
+    output logic [QDEPTH-1:0] q0_pre,
+    output logic [QDEPTH*3-1:0] q0_pri,
+    output logic [QDEPTH*6-1:0] q0_tid,
+    output logic [QDEPTH*TS_ID_W-1:0] q0_ts,
+    output logic [QDEPTH*4-1:0] q0_tidx,
+    output logic [QDEPTH*BURST_W-1:0] q0_burst,
+    input logic [QDEPTH-1:0] q0_ack, // 逐槽清空（本拍被调度的槽）
+    output logic [QDEPTH-1:0] q1_vld,
+    output logic [QDEPTH-1:0] q1_pre,
+    output logic [QDEPTH*3-1:0] q1_pri,
+    output logic [QDEPTH*6-1:0] q1_tid,
+    output logic [QDEPTH*TS_ID_W-1:0] q1_ts,
+    output logic [QDEPTH*4-1:0] q1_tidx,
+    output logic [QDEPTH*BURST_W-1:0] q1_burst,
+    input logic [QDEPTH-1:0] q1_ack,
+    // ---- burst_sch 读侧：c_task 缓存（解析后的单 task 项） ----
+    output logic [CT_DEPTH-1:0] ct_vld,
+    output logic [CT_DEPTH*3-1:0] ct_pri,
+    output logic [CT_DEPTH*6-1:0] ct_tid,
+    output logic [CT_DEPTH*4-1:0] ct_tidx,
+    output logic [CT_DEPTH*TS_ID_W-1:0] ct_ts,
+    output logic [CT_DEPTH*3-1:0] ct_dma,
+    output logic [CT_DEPTH*2-1:0] ct_tag,
+    output logic [CT_DEPTH-1:0] ct_op,
+    input logic [CT_DEPTH-1:0] ct_ack
     );
 
     import poe_types_pkg::*;
 
-    localparam int PTR_W = $clog2(QDEPTH);
-    // 队列项 {pre, burst, burst_ts, th_id}
-    localparam int QW = 1 + BURST_W + TS_ID_W + 4 + 6; // {pre, burst, burst_ts, ts_idx, th_id}
-    logic [QW-1:0] q0_mem [QDEPTH];
-    logic [PTR_W-1:0] q0_head, q0_tail;
-    logic [PTR_W:0] q0_cnt;
-    logic [QW-1:0] q1_mem [QDEPTH];
-    logic [PTR_W-1:0] q1_head, q1_tail;
-    logic [PTR_W:0] q1_cnt;
+    // ---- i/v 槽项：{pre, pri(3), tid(6), ts(6), tidx(4), burst(38)} ----
+    typedef struct packed {
+        logic pre;
+        logic [2:0] pri;
+        logic [5:0] tid;
+        logic [TS_ID_W-1:0] ts;
+        logic [3:0] tidx;
+        logic [BURST_W-1:0] burst;
+    } iv_qitem_t;
+    // ---- c_task 槽项：{pri(3), tid(6), tidx(4), ts(6), dma_id(3), tag(2), op(1)} ----
+    typedef struct packed {
+        logic [2:0] pri;
+        logic [5:0] tid;
+        logic [3:0] tidx;
+        logic [TS_ID_W-1:0] ts; // 所属 ts 编号（DSE 发射需 ts==curts）
+        logic [2:0] dma_id;
+        logic [1:0] tag; // DSE（0..3）
+        logic op; // 0=loc 1=free
+    } ct_item_t;
+
+    iv_qitem_t q0_mem [QDEPTH];
+    logic [QDEPTH-1:0] q0_vld_r;
+    iv_qitem_t q1_mem [QDEPTH];
+    logic [QDEPTH-1:0] q1_vld_r;
+    ct_item_t ct_mem [CT_DEPTH];
+    logic [CT_DEPTH-1:0] ct_vld_r;
 
     logic iss0, iss1;
     int tid0, tid1;
     logic [2:0] pri0, pri1;
+    burst_iv_t b0, b1;
+
     // 全局取 (pri, tid) 最小的两个 READY 线程（无奇偶分组）；
     // 第二名胜出者排除与第一名同锁 id 的 loc burst（st=1 && lock_req）
     always_comb begin
@@ -75,8 +105,9 @@ module poe_thsch #(
         for (int s = 0; s < MAX_THREADS; s++)
             if (ready_mask[s]) begin
                 automatic logic [2:0] p = ready_pri[s*3 +: 3];
-                if (p < pri0 || (p == pri0 && s < tid0) || !iss0)
+                if (p < pri0 || (p == pri0 && s < tid0) || !iss0) begin
                     iss0 = 1'b1; tid0 = s; pri0 = p;
+                end
             end
         rb0 = ready_burst[tid0*BURST_W +: BURST_W];
         lock0_eff = iss0 && rb0.st && rb0.lock_req;
@@ -87,66 +118,234 @@ module poe_thsch #(
                 automatic burst_iv_t rb = ready_burst[s*BURST_W +: BURST_W];
                 if (lock0_eff && rb.st && rb.lock_req && rb.lock_id == rb0.lock_id)
                     continue; // 同拍不能同时发射同锁 id 的 loc burst
-                if (p < pri1 || (p == pri1 && s < tid1) || !iss1)
+                if (p < pri1 || (p == pri1 && s < tid1) || !iss1) begin
                     iss1 = 1'b1; tid1 = s; pri1 = p;
+                end
             end
     end
 
-    assign q0_vld = (q0_cnt != 0);
-    assign q1_vld = (q1_cnt != 0);
-    assign q0_tid = q0_mem[q0_head][5:0];
-    assign q0_ts = q0_mem[q0_head][TS_ID_W+9:TS_ID_W+4]; // burst_ts（tidx 插入后位段）
-    assign q0_tidx = q0_mem[q0_head][TS_ID_W+3:TS_ID_W];
-    assign q0_burst = q0_mem[q0_head][QW-2:TS_ID_W+10];
-    assign q0_pre = q0_mem[q0_head][QW-1];
-    assign q1_tid = q1_mem[q1_head][5:0];
-    assign q1_ts = q1_mem[q1_head][TS_ID_W+9:TS_ID_W+4];
-    assign q1_tidx = q1_mem[q1_head][TS_ID_W+3:TS_ID_W];
-    assign q1_burst = q1_mem[q1_head][QW-2:TS_ID_W+10];
-    assign q1_pre = q1_mem[q1_head][QW-1];
+    assign b0 = ready_burst[tid0*BURST_W +: BURST_W];
+    assign b1 = ready_burst[tid1*BURST_W +: BURST_W];
 
-    // 发射使能：各目标队列未满（winner0→q0、winner1→q1）
-    assign iss_vld0 = iss0 && (q0_cnt != QDEPTH);
+    // ---- 空闲槽计数（ct 16 槽需 5bit，4bit 会回绕成 0） ----
+    logic [4:0] free_q0, free_q1, free_ct;
+    always_comb begin
+        free_q0 = 5'd0; free_q1 = 5'd0; free_ct = 5'd0;
+        for (int i = 0; i < QDEPTH; i++) begin
+            if (!q0_vld_r[i]) free_q0 = free_q0 + 1'b1;
+            if (!q1_vld_r[i]) free_q1 = free_q1 + 1'b1;
+        end
+        for (int i = 0; i < CT_DEPTH; i++)
+            if (!ct_vld_r[i]) free_ct = free_ct + 1'b1;
+    end
+
+    // ---- c_task burst 需占用的缓存槽数（无有效任务时按 1 计，保证 done 路径） ----
+    logic [1:0] need0, need1;
+    always_comb begin
+        need0 = 2'd0; need1 = 2'd0;
+        if (iss0 && b0.burst_type) begin
+            automatic burst_c_t cb = ready_burst[tid0*BURST_W +: BURST_W];
+            automatic logic [7:0] dc = csr_dma_c[tid0*8 +: 8];
+            if (cb.c0 && dc[cb.dma_id0]) need0 = need0 + 2'd1;
+            if (cb.vld_cu && cb.c1 && dc[cb.dma_id1]) need0 = need0 + 2'd1;
+            if (need0 == 2'd0) need0 = 2'd1;
+        end
+        if (iss1 && b1.burst_type) begin
+            automatic burst_c_t cb = ready_burst[tid1*BURST_W +: BURST_W];
+            automatic logic [7:0] dc = csr_dma_c[tid1*8 +: 8];
+            if (cb.c0 && dc[cb.dma_id0]) need1 = need1 + 2'd1;
+            if (cb.vld_cu && cb.c1 && dc[cb.dma_id1]) need1 = need1 + 2'd1;
+            if (need1 == 2'd0) need1 = 2'd1;
+        end
+    end
+
+    // ---- 发射使能：i/v → 对应槽池有空；c_task → c_task 缓存有足够空间 ----
+    assign iss_vld0 = iss0 && (b0.burst_type ? (free_ct >= need0) : (free_q0 != 5'd0));
     assign iss_tid0 = tid0[5:0];
-    assign iss_vld1 = iss1 && (q1_cnt != QDEPTH);
+    assign iss_vld1 = iss1 && (b1.burst_type ? (free_ct >= need0 + need1) : (free_q1 != 5'd0));
     assign iss_tid1 = tid1[5:0];
 
-    logic q0_wr, q1_wr;
-    assign q0_wr = iss_vld0; // winner0 → q0
-    assign q1_wr = iss_vld1; // winner1 → q1
+    // ---- 找第 n 个空闲槽（跳过 excl 中已分配索引） ----
+    function automatic int q_free_idx(input int n, input logic [7:0] excl,
+                                      input logic [7:0] vld);
+        automatic int c = 0;
+        for (int i = 0; i < QDEPTH; i++)
+            if (!vld[i] && !excl[i]) begin
+                if (c == n) return i;
+                c++;
+            end
+        return -1;
+    endfunction
+    function automatic int ct_free_idx(input int n, input logic [15:0] excl);
+        automatic int c = 0;
+        for (int i = 0; i < CT_DEPTH; i++)
+            if (!ct_vld_r[i] && !excl[i]) begin
+                if (c == n) return i;
+                c++;
+            end
+        return -1;
+    endfunction
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            q0_head <= '0; q0_tail <= '0; q0_cnt <= '0;
-            q1_head <= '0; q1_tail <= '0; q1_cnt <= '0;
+            for (int i = 0; i < QDEPTH; i++) begin
+                q0_vld_r[i] <= 1'b0;
+                q1_vld_r[i] <= 1'b0;
+            end
+            for (int i = 0; i < CT_DEPTH; i++) ct_vld_r[i] <= 1'b0;
         end else begin
-            // 发射写队列（一级发射）
-            if (q0_wr) begin
-                q0_mem[q0_tail] <= {1'b0,
-                ready_burst[tid0*BURST_W +: BURST_W],
-                ready_burst_ts[tid0*TS_ID_W +: TS_ID_W],
-                ready_burst_tidx[tid0*4 +: 4], tid0[5:0]};
-                q0_tail <= (q0_tail == QDEPTH-1) ? '0 : q0_tail + 1'b1;
+            automatic logic [15:0] ct_excl = 16'b0;
+            // ---- 清槽（burst_sch 本拍调度的槽） ----
+            for (int i = 0; i < QDEPTH; i++) begin
+                if (q0_ack[i]) q0_vld_r[i] <= 1'b0;
+                if (q1_ack[i]) q1_vld_r[i] <= 1'b0;
             end
-            if (q1_wr) begin
-                q1_mem[q1_tail] <= {1'b0,
-                ready_burst[tid1*BURST_W +: BURST_W],
-                ready_burst_ts[tid1*TS_ID_W +: TS_ID_W],
-                ready_burst_tidx[tid1*4 +: 4], tid1[5:0]};
-                q1_tail <= (q1_tail == QDEPTH-1) ? '0 : q1_tail + 1'b1;
+            for (int i = 0; i < CT_DEPTH; i++)
+                if (ct_ack[i]) ct_vld_r[i] <= 1'b0;
+            // ---- winner0：i/v → q0；c_task → 解析入 c_task 缓存 ----
+            if (iss_vld0) begin
+                if (!b0.burst_type) begin
+                    automatic int idx = q_free_idx(0, 8'b0, q0_vld_r);
+                    if (idx >= 0) begin
+                        q0_mem[idx] <= {1'b0,
+                        ready_pri[tid0*3 +: 3],
+                        tid0[5:0],
+                        ready_burst_ts[tid0*TS_ID_W +: TS_ID_W],
+                        ready_burst_tidx[tid0*4 +: 4],
+                        ready_burst[tid0*BURST_W +: BURST_W]};
+                        q0_vld_r[idx] <= 1'b1;
+                    end
+                end else begin
+                    automatic burst_c_t cb = ready_burst[tid0*BURST_W +: BURST_W];
+                    automatic logic [7:0] dc = csr_dma_c[tid0*8 +: 8];
+                    automatic logic t0 = cb.c0 && dc[cb.dma_id0];
+                    automatic logic t1 = cb.vld_cu && cb.c1 && dc[cb.dma_id1];
+                    automatic int idx;
+                    if (t0) begin
+                        automatic cw_entry_t ce = csr_cw[tid0*384 +: 384][cb.dma_id0*48 +: 48];
+                        idx = ct_free_idx(0, ct_excl);
+                        if (idx >= 0) begin
+                            ct_mem[idx] <= {ready_pri[tid0*3 +: 3], tid0[5:0],
+                            ready_burst_tidx[tid0*4 +: 4],
+                            ready_burst_ts[tid0*TS_ID_W +: TS_ID_W], cb.dma_id0,
+                            ce.tag[1:0], ce.op_type};
+                            ct_vld_r[idx] <= 1'b1;
+                            ct_excl[idx] = 1'b1;
+                        end
+                    end
+                    if (t1) begin
+                        automatic cw_entry_t ce = csr_cw[tid0*384 +: 384][cb.dma_id1*48 +: 48];
+                        idx = ct_free_idx(0, ct_excl);
+                        if (idx >= 0) begin
+                            ct_mem[idx] <= {ready_pri[tid0*3 +: 3], tid0[5:0],
+                            ready_burst_tidx[tid0*4 +: 4],
+                            ready_burst_ts[tid0*TS_ID_W +: TS_ID_W], cb.dma_id1,
+                            ce.tag[1:0], ce.op_type};
+                            ct_vld_r[idx] <= 1'b1;
+                            ct_excl[idx] = 1'b1;
+                        end
+                    end
+                    if (!t0 && !t1) begin // 空 c_task：占位 task（保 done 路径）
+                        automatic cw_entry_t ce = csr_cw[tid0*384 +: 384][cb.dma_id0*48 +: 48];
+                        idx = ct_free_idx(0, ct_excl);
+                        if (idx >= 0) begin
+                            ct_mem[idx] <= {ready_pri[tid0*3 +: 3], tid0[5:0],
+                            ready_burst_tidx[tid0*4 +: 4],
+                            ready_burst_ts[tid0*TS_ID_W +: TS_ID_W], cb.dma_id0,
+                            2'd0, 1'b0};
+                            ct_vld_r[idx] <= 1'b1;
+                            ct_excl[idx] = 1'b1;
+                        end
+                    end
+                end
             end
-            // burst_sch 读
-            if (q0_ack && q0_vld) begin
-                q0_head <= (q0_head == QDEPTH-1) ? '0 : q0_head + 1'b1;
+            // ---- winner1：i/v → q1；c_task → c_task 缓存（继续 winner0 的 excl） ----
+            if (iss_vld1) begin
+                if (!b1.burst_type) begin
+                    automatic int idx = q_free_idx(0, 8'b0, q1_vld_r);
+                    if (idx >= 0) begin
+                        q1_mem[idx] <= {1'b0,
+                        ready_pri[tid1*3 +: 3],
+                        tid1[5:0],
+                        ready_burst_ts[tid1*TS_ID_W +: TS_ID_W],
+                        ready_burst_tidx[tid1*4 +: 4],
+                        ready_burst[tid1*BURST_W +: BURST_W]};
+                        q1_vld_r[idx] <= 1'b1;
+                    end
+                end else begin
+                    automatic burst_c_t cb = ready_burst[tid1*BURST_W +: BURST_W];
+                    automatic logic [7:0] dc = csr_dma_c[tid1*8 +: 8];
+                    automatic logic t0 = cb.c0 && dc[cb.dma_id0];
+                    automatic logic t1 = cb.vld_cu && cb.c1 && dc[cb.dma_id1];
+                    automatic int idx;
+                    if (t0) begin
+                        automatic cw_entry_t ce = csr_cw[tid1*384 +: 384][cb.dma_id0*48 +: 48];
+                        idx = ct_free_idx(0, ct_excl);
+                        if (idx >= 0) begin
+                            ct_mem[idx] <= {ready_pri[tid1*3 +: 3], tid1[5:0],
+                            ready_burst_tidx[tid1*4 +: 4],
+                            ready_burst_ts[tid1*TS_ID_W +: TS_ID_W], cb.dma_id0,
+                            ce.tag[1:0], ce.op_type};
+                            ct_vld_r[idx] <= 1'b1;
+                            ct_excl[idx] = 1'b1;
+                        end
+                    end
+                    if (t1) begin
+                        automatic cw_entry_t ce = csr_cw[tid1*384 +: 384][cb.dma_id1*48 +: 48];
+                        idx = ct_free_idx(0, ct_excl);
+                        if (idx >= 0) begin
+                            ct_mem[idx] <= {ready_pri[tid1*3 +: 3], tid1[5:0],
+                            ready_burst_tidx[tid1*4 +: 4],
+                            ready_burst_ts[tid1*TS_ID_W +: TS_ID_W], cb.dma_id1,
+                            ce.tag[1:0], ce.op_type};
+                            ct_vld_r[idx] <= 1'b1;
+                            ct_excl[idx] = 1'b1;
+                        end
+                    end
+                    if (!t0 && !t1) begin
+                        automatic cw_entry_t ce = csr_cw[tid1*384 +: 384][cb.dma_id0*48 +: 48];
+                        idx = ct_free_idx(0, ct_excl);
+                        if (idx >= 0) begin
+                            ct_mem[idx] <= {ready_pri[tid1*3 +: 3], tid1[5:0],
+                            ready_burst_tidx[tid1*4 +: 4],
+                            ready_burst_ts[tid1*TS_ID_W +: TS_ID_W], cb.dma_id0,
+                            2'd0, 1'b0};
+                            ct_vld_r[idx] <= 1'b1;
+                            ct_excl[idx] = 1'b1;
+                        end
+                    end
+                end
             end
-            if (q1_ack && q1_vld) begin
-                q1_head <= (q1_head == QDEPTH-1) ? '0 : q1_head + 1'b1;
-            end
-            // 计数：写 +1 / 读 -1（同拍写读净 0）
-            if (q0_wr && !(q0_ack && q0_vld)) q0_cnt <= q0_cnt + 1'b1;
-            else if (!q0_wr && (q0_ack && q0_vld)) q0_cnt <= q0_cnt - 1'b1;
-            if (q1_wr && !(q1_ack && q1_vld)) q1_cnt <= q1_cnt + 1'b1;
-            else if (!q1_wr && (q1_ack && q1_vld)) q1_cnt <= q1_cnt - 1'b1;
+        end
+    end
+
+    // ---- 扁平导出：burst_sch 按优先级调度任意有效槽 ----
+    always_comb begin
+        for (int i = 0; i < QDEPTH; i++) begin
+            q0_vld[i] = q0_vld_r[i];
+            q0_pre[i] = q0_mem[i].pre;
+            q0_pri[i*3 +: 3] = q0_mem[i].pri;
+            q0_tid[i*6 +: 6] = q0_mem[i].tid;
+            q0_ts[i*TS_ID_W +: TS_ID_W] = q0_mem[i].ts;
+            q0_tidx[i*4 +: 4] = q0_mem[i].tidx;
+            q0_burst[i*BURST_W +: BURST_W] = q0_mem[i].burst;
+            q1_vld[i] = q1_vld_r[i];
+            q1_pre[i] = q1_mem[i].pre;
+            q1_pri[i*3 +: 3] = q1_mem[i].pri;
+            q1_tid[i*6 +: 6] = q1_mem[i].tid;
+            q1_ts[i*TS_ID_W +: TS_ID_W] = q1_mem[i].ts;
+            q1_tidx[i*4 +: 4] = q1_mem[i].tidx;
+            q1_burst[i*BURST_W +: BURST_W] = q1_mem[i].burst;
+        end
+        for (int i = 0; i < CT_DEPTH; i++) begin
+            ct_vld[i] = ct_vld_r[i];
+            ct_pri[i*3 +: 3] = ct_mem[i].pri;
+            ct_tid[i*6 +: 6] = ct_mem[i].tid;
+            ct_tidx[i*4 +: 4] = ct_mem[i].tidx;
+            ct_ts[i*TS_ID_W +: TS_ID_W] = ct_mem[i].ts;
+            ct_dma[i*3 +: 3] = ct_mem[i].dma_id;
+            ct_tag[i*2 +: 2] = ct_mem[i].tag;
+            ct_op[i] = ct_mem[i].op;
         end
     end
 endmodule

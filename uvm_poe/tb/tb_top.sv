@@ -70,42 +70,50 @@ module tb_top;
     logic [79:0] pre_dma_addr;
     logic [3:0] pre_op;
     logic pre_buf_rdy; // burst_sch 预读缓存空间
-    logic [3:0] pre_op_vld; // burst_sch → dma_ctrl 预读发射
-    logic [23:0] pre_op_tid;
-    logic [79:0] pre_op_addr;
-    logic [3:0] pre_op_type;
-    logic pre_op_ack;
-    logic q0_vld, q1_vld;
-    logic [5:0] q0_tid, q1_tid;
-    logic [5:0] q0_ts, q1_ts;
-    logic [3:0] q0_tidx, q1_tidx;
-    logic [BURST_W-1:0] q0_burst, q1_burst;
-    logic q0_pre, q1_pre;
-    logic q0_ack, q1_ack;
+    // ---- th_sch 槽池视图（q0/q1 i/v + c_task 缓存，逐槽扁平） ----
+    logic [7:0] q0_vld, q0_pre, q1_vld, q1_pre;
+    logic [23:0] q0_pri, q1_pri;
+    logic [47:0] q0_tid, q1_tid;
+    logic [47:0] q0_ts, q1_ts;
+    logic [31:0] q0_tidx, q1_tidx;
+    logic [303:0] q0_burst, q1_burst;
+    logic [7:0] q0_ack, q1_ack;
+    logic [15:0] ct_vld;
+    logic [47:0] ct_pri;
+    logic [95:0] ct_tid;
+    logic [63:0] ct_tidx;
+    logic [95:0] ct_ts;
+    logic [47:0] ct_dma;
+    logic [31:0] ct_tag;
+    logic [15:0] ct_op;
+    logic [15:0] ct_ack;
     logic [511:0] csr_dma_c;
     logic [24575:0] csr_cw;
     logic [7:0] pre_dma_c;
     logic [255:0] pre_cw;
     logic owin_bp;
-    logic emit_cu_vld0, cu0_ack;
-    logic [5:0] emit_cu_tid0;
-    logic [3:0] emit_cu_tidx0;
-    logic [BURST_W-1:0] emit_cu_burst0;
-    logic emit_cu_vld1, cu1_ack;
-    logic [5:0] emit_cu_tid1;
-    logic [3:0] emit_cu_tidx1;
-    logic [BURST_W-1:0] emit_cu_burst1;
-    logic emit_dma_vld, dma_ack;
-    logic [5:0] emit_dma_tid;
-    logic [3:0] emit_dma_tidx;
-    logic [BURST_W-1:0] emit_dma_burst;
-    logic emit_dma_pre;
-    logic cu_done_vld0, cu_done_vld1;
-    logic [5:0] cu_done_tid0, cu_done_tid1;
-    logic [3:0] cu_done_tidx0, cu_done_tidx1;
-    logic dma_done_vld;
-    logic [5:0] dma_done_tid;
-    logic [3:0] dma_done_tidx;
+    // ---- EU（2 个，各含 4 个 CU 桩）----
+    logic emit_eu_vld0, eu0_ack;
+    logic [5:0] emit_eu_tid0;
+    logic [3:0] emit_eu_tidx0;
+    logic [BURST_W-1:0] emit_eu_burst0;
+    logic emit_eu_vld1, eu1_ack;
+    logic [5:0] emit_eu_tid1;
+    logic [3:0] emit_eu_tidx1;
+    logic [BURST_W-1:0] emit_eu_burst1;
+    logic eu_done_vld0, eu_done_vld1;
+    logic [5:0] eu_done_tid0, eu_done_tid1;
+    logic [3:0] eu_done_tidx0, eu_done_tidx1;
+    // ---- dma_ctrl（4 个 DSE 单元）----
+    logic [3:0] emit_dma_vld, dma_ack;
+    logic [23:0] emit_dma_tid;
+    logic [15:0] emit_dma_tidx;
+    logic [11:0] emit_dma_dma_id;
+    logic [7:0] emit_dma_tag;
+    logic [3:0] emit_dma_op;
+    logic [3:0] dma_done_vld;
+    logic [23:0] dma_done_tid;
+    logic [15:0] dma_done_tidx;
 
     poe_thm #(.MAX_THREADS(64)) u_thm (
     .clk(clk), .rst_n(rst_n),
@@ -121,10 +129,10 @@ module tb_top;
     .ready_burst(ready_burst),
     .iss_vld0(iss_vld0), .iss_tid0(iss_tid0),
     .iss_vld1(iss_vld1), .iss_tid1(iss_tid1),
-    .cu_done_vld0(cu_done_vld0), .cu_done_tid0(cu_done_tid0),
-    .cu_done_tidx0(cu_done_tidx0),
-    .cu_done_vld1(cu_done_vld1), .cu_done_tid1(cu_done_tid1),
-    .cu_done_tidx1(cu_done_tidx1),
+    .eu_done_vld0(eu_done_vld0), .eu_done_tid0(eu_done_tid0),
+    .eu_done_tidx0(eu_done_tidx0),
+    .eu_done_vld1(eu_done_vld1), .eu_done_tid1(eu_done_tid1),
+    .eu_done_tidx1(eu_done_tidx1),
     .dma_done_vld(dma_done_vld), .dma_done_tid(dma_done_tid),
     .dma_done_tidx(dma_done_tidx),
     .emit_vld(1'b0), .emit_tid(6'd0),
@@ -146,66 +154,100 @@ module tb_top;
     .ready_burst(ready_burst),
     .iss_vld0(iss_vld0), .iss_tid0(iss_tid0),
     .iss_vld1(iss_vld1), .iss_tid1(iss_tid1),
-    .q0_vld(q0_vld), .q0_tid(q0_tid), .q0_ts(q0_ts),
-    .q0_tidx(q0_tidx), .q0_burst(q0_burst), .q0_pre(q0_pre), .q0_ack(q0_ack),
-    .q1_vld(q1_vld), .q1_tid(q1_tid), .q1_ts(q1_ts),
-    .q1_tidx(q1_tidx), .q1_burst(q1_burst), .q1_pre(q1_pre), .q1_ack(q1_ack)
+    .csr_dma_c(csr_dma_c), .csr_cw(csr_cw),
+    .q0_vld(q0_vld), .q0_pre(q0_pre), .q0_pri(q0_pri),
+    .q0_tid(q0_tid), .q0_ts(q0_ts), .q0_tidx(q0_tidx),
+    .q0_burst(q0_burst), .q0_ack(q0_ack),
+    .q1_vld(q1_vld), .q1_pre(q1_pre), .q1_pri(q1_pri),
+    .q1_tid(q1_tid), .q1_ts(q1_ts), .q1_tidx(q1_tidx),
+    .q1_burst(q1_burst), .q1_ack(q1_ack),
+    .ct_vld(ct_vld), .ct_pri(ct_pri), .ct_tid(ct_tid),
+    .ct_tidx(ct_tidx), .ct_ts(ct_ts), .ct_dma(ct_dma), .ct_tag(ct_tag),
+    .ct_op(ct_op), .ct_ack(ct_ack)
     );
 
     poe_burstsch #(.MAX_THREADS(64)) u_burstsch (
     .clk(clk), .rst_n(rst_n),
-    .q0_vld(q0_vld), .q0_tid(q0_tid), .q0_ts(q0_ts),
-    .q0_tidx(q0_tidx), .q0_burst(q0_burst), .q0_pre(q0_pre), .q0_ack(q0_ack),
-    .q1_vld(q1_vld), .q1_tid(q1_tid), .q1_ts(q1_ts),
-    .q1_tidx(q1_tidx), .q1_burst(q1_burst), .q1_pre(q1_pre), .q1_ack(q1_ack),
+    .q0_vld(q0_vld), .q0_pre(q0_pre), .q0_pri(q0_pri),
+    .q0_tid(q0_tid), .q0_ts(q0_ts), .q0_tidx(q0_tidx),
+    .q0_burst(q0_burst), .q0_ack(q0_ack),
+    .q1_vld(q1_vld), .q1_pre(q1_pre), .q1_pri(q1_pri),
+    .q1_tid(q1_tid), .q1_ts(q1_ts), .q1_tidx(q1_tidx),
+    .q1_burst(q1_burst), .q1_ack(q1_ack),
+    .ct_vld(ct_vld), .ct_pri(ct_pri), .ct_tid(ct_tid),
+    .ct_tidx(ct_tidx), .ct_ts(ct_ts), .ct_dma(ct_dma), .ct_tag(ct_tag),
+    .ct_op(ct_op), .ct_ack(ct_ack),
     .thread_curts(ready_curts),
     .owin_bp(owin_bp),
-    .emit_cu_vld0(emit_cu_vld0), .emit_cu_tid0(emit_cu_tid0),
-    .emit_cu_tidx0(emit_cu_tidx0), .emit_cu_burst0(emit_cu_burst0),
-    .cu0_ack(cu0_ack),
-    .emit_cu_vld1(emit_cu_vld1), .emit_cu_tid1(emit_cu_tid1),
-    .emit_cu_tidx1(emit_cu_tidx1), .emit_cu_burst1(emit_cu_burst1),
-    .cu1_ack(cu1_ack),
+    .emit_eu_vld0(emit_eu_vld0), .emit_eu_tid0(emit_eu_tid0),
+    .emit_eu_tidx0(emit_eu_tidx0), .emit_eu_burst0(emit_eu_burst0),
+    .eu0_ack(eu0_ack),
+    .emit_eu_vld1(emit_eu_vld1), .emit_eu_tid1(emit_eu_tid1),
+    .emit_eu_tidx1(emit_eu_tidx1), .emit_eu_burst1(emit_eu_burst1),
+    .eu1_ack(eu1_ack),
     .emit_dma_vld(emit_dma_vld), .emit_dma_tid(emit_dma_tid),
-    .emit_dma_tidx(emit_dma_tidx), .emit_dma_burst(emit_dma_burst),
-    .emit_dma_pre(emit_dma_pre),
+    .emit_dma_tidx(emit_dma_tidx), .emit_dma_dma_id(emit_dma_dma_id),
+    .emit_dma_tag(emit_dma_tag), .emit_dma_op(emit_dma_op),
     .dma_ack(dma_ack),
     .pre_vld(pre_vld), .pre_tid(pre_tid),
     .pre_dma_addr(pre_dma_addr), .pre_op(pre_op),
-    .pre_buf_rdy(pre_buf_rdy),
-    .pre_op_vld(pre_op_vld), .pre_op_tid(pre_op_tid),
-    .pre_op_addr(pre_op_addr), .pre_op_type(pre_op_type),
-    .pre_op_ack(pre_op_ack)
+    .pre_buf_rdy(pre_buf_rdy)
     );
 
-    poe_cu_stub #(.LATENCY(1)) u_cu0 (
+    poe_eu_stub #(.LATENCY(1)) u_eu0 (
     .clk(clk), .rst_n(rst_n),
-    .emit_cu_vld(emit_cu_vld0), .emit_cu_tid(emit_cu_tid0),
-    .emit_cu_tidx(emit_cu_tidx0), .emit_cu_burst(emit_cu_burst0),
-    .cu_ack(cu0_ack),
-    .cu_done_vld(cu_done_vld0), .cu_done_tid(cu_done_tid0), .cu_done_tidx(cu_done_tidx0)
+    .emit_eu_vld(emit_eu_vld0), .emit_eu_tid(emit_eu_tid0),
+    .emit_eu_tidx(emit_eu_tidx0), .emit_eu_burst(emit_eu_burst0),
+    .eu_ack(eu0_ack),
+    .eu_done_vld(eu_done_vld0), .eu_done_tid(eu_done_tid0), .eu_done_tidx(eu_done_tidx0)
     );
 
-    poe_cu_stub #(.LATENCY(1)) u_cu1 (
+    poe_eu_stub #(.LATENCY(1)) u_eu1 (
     .clk(clk), .rst_n(rst_n),
-    .emit_cu_vld(emit_cu_vld1), .emit_cu_tid(emit_cu_tid1),
-    .emit_cu_tidx(emit_cu_tidx1), .emit_cu_burst(emit_cu_burst1),
-    .cu_ack(cu1_ack),
-    .cu_done_vld(cu_done_vld1), .cu_done_tid(cu_done_tid1), .cu_done_tidx(cu_done_tidx1)
+    .emit_eu_vld(emit_eu_vld1), .emit_eu_tid(emit_eu_tid1),
+    .emit_eu_tidx(emit_eu_tidx1), .emit_eu_burst(emit_eu_burst1),
+    .eu_ack(eu1_ack),
+    .eu_done_vld(eu_done_vld1), .eu_done_tid(eu_done_tid1), .eu_done_tidx(eu_done_tidx1)
     );
 
-    poe_dma_ctrl u_dma (
+    poe_dma_ctrl u_dma0 (
     .clk(clk), .rst_n(rst_n),
-    .emit_dma_vld(emit_dma_vld), .emit_dma_tid(emit_dma_tid),
-    .emit_dma_tidx(emit_dma_tidx), .emit_dma_burst(emit_dma_burst),
-    .emit_dma_pre(emit_dma_pre),
-    .csr_dma_c(csr_dma_c), .csr_cw(csr_cw),
-    .dma_ack(dma_ack),
-    .dma_done_vld(dma_done_vld), .dma_done_tid(dma_done_tid),
-    .dma_done_tidx(dma_done_tidx),
-    .pre_op_vld(pre_op_vld), .pre_op_tid(pre_op_tid),
-    .pre_op_addr(pre_op_addr), .pre_op_type(pre_op_type),
-    .pre_op_ack(pre_op_ack)
+    .emit_dma_vld(emit_dma_vld[0]), .emit_dma_tid(emit_dma_tid[5:0]),
+    .emit_dma_tidx(emit_dma_tidx[3:0]), .emit_dma_dma_id(emit_dma_dma_id[2:0]),
+    .emit_dma_tag(emit_dma_tag[1:0]), .emit_dma_op(emit_dma_op[0]),
+    .dma_ack(dma_ack[0]),
+    .dma_done_vld(dma_done_vld[0]), .dma_done_tid(dma_done_tid[5:0]),
+    .dma_done_tidx(dma_done_tidx[3:0])
+    );
+
+    poe_dma_ctrl u_dma1 (
+    .clk(clk), .rst_n(rst_n),
+    .emit_dma_vld(emit_dma_vld[1]), .emit_dma_tid(emit_dma_tid[11:6]),
+    .emit_dma_tidx(emit_dma_tidx[7:4]), .emit_dma_dma_id(emit_dma_dma_id[5:3]),
+    .emit_dma_tag(emit_dma_tag[3:2]), .emit_dma_op(emit_dma_op[1]),
+    .dma_ack(dma_ack[1]),
+    .dma_done_vld(dma_done_vld[1]), .dma_done_tid(dma_done_tid[11:6]),
+    .dma_done_tidx(dma_done_tidx[7:4])
+    );
+
+    poe_dma_ctrl u_dma2 (
+    .clk(clk), .rst_n(rst_n),
+    .emit_dma_vld(emit_dma_vld[2]), .emit_dma_tid(emit_dma_tid[17:12]),
+    .emit_dma_tidx(emit_dma_tidx[11:8]), .emit_dma_dma_id(emit_dma_dma_id[8:6]),
+    .emit_dma_tag(emit_dma_tag[5:4]), .emit_dma_op(emit_dma_op[2]),
+    .dma_ack(dma_ack[2]),
+    .dma_done_vld(dma_done_vld[2]), .dma_done_tid(dma_done_tid[17:12]),
+    .dma_done_tidx(dma_done_tidx[11:8])
+    );
+
+    poe_dma_ctrl u_dma3 (
+    .clk(clk), .rst_n(rst_n),
+    .emit_dma_vld(emit_dma_vld[3]), .emit_dma_tid(emit_dma_tid[23:18]),
+    .emit_dma_tidx(emit_dma_tidx[15:12]), .emit_dma_dma_id(emit_dma_dma_id[11:9]),
+    .emit_dma_tag(emit_dma_tag[7:6]), .emit_dma_op(emit_dma_op[3]),
+    .dma_ack(dma_ack[3]),
+    .dma_done_vld(dma_done_vld[3]), .dma_done_tid(dma_done_tid[23:18]),
+    .dma_done_tidx(dma_done_tidx[15:12])
     );
 
     // O 窗反压占位：固定 0（O 窗池设计后续补充）
@@ -214,48 +256,45 @@ module tb_top;
     integer thm_logf;
     initial thm_logf = $fopen("thm_dbg.log", "w");
     always @(posedge clk) begin
-        burst_c_t b0, b1;
-        b0 = q0_burst;
-        b1 = q1_burst;
-        // 新语义：队列允许出现 cur_ts 及更靠后的 burst；q.ts < cur_ts 才属于异常。
-        // pre_read 插队 burst 无线程归属，跳过 ts/cur_ts 比较
-    if (q0_vld && !q0_pre && (q0_ts < ready_curts[q0_tid*6 +: 6]))
-        $fdisplay(thm_logf, "OLD_BURST0 t=%0t q0ts=%0d curts=%0d tid=%0d st=%0d pc=%0d need=%0d tscnt=%0d",
-        $time, q0_ts, ready_curts[q0_tid*6 +: 6], q0_tid,
-            u_thm.th_state[q0_tid], u_thm.th_bs_pc[q0_tid],
-        u_thm.th_need[q0_tid][u_thm.th_ts_idx[q0_tid]], u_thm.th_ts_n[q0_tid]);
-    if (q1_vld && !q1_pre && (q1_ts < ready_curts[q1_tid*6 +: 6]))
-        $fdisplay(thm_logf, "OLD_BURST1 t=%0t q1ts=%0d curts=%0d tid=%0d st=%0d pc=%0d need=%0d tscnt=%0d",
-        $time, q1_ts, ready_curts[q1_tid*6 +: 6], q1_tid,
-            u_thm.th_state[q1_tid], u_thm.th_bs_pc[q1_tid],
-        u_thm.th_need[q1_tid][u_thm.th_ts_idx[q1_tid]], u_thm.th_ts_n[q1_tid]);
-        if (emit_cu_vld0 || emit_cu_vld1) begin
+        burst_c_t cb0, cb1;
+        // 槽池异常检查：vld 且非 pre 且 ts < cur_ts
+        for (int i = 0; i < 8; i++) begin
+            if (q0_vld[i] && !q0_pre[i] &&
+                (q0_ts[i*6 +: 6] < ready_curts[q0_tid[i*6 +: 6]*6 +: 6]))
+                $fdisplay(thm_logf, "OLD_BURST0 t=%0t slot=%0d q0ts=%0d curts=%0d tid=%0d",
+                $time, i, q0_ts[i*6 +: 6],
+                ready_curts[q0_tid[i*6 +: 6]*6 +: 6], q0_tid[i*6 +: 6]);
+            if (q1_vld[i] && !q1_pre[i] &&
+                (q1_ts[i*6 +: 6] < ready_curts[q1_tid[i*6 +: 6]*6 +: 6]))
+                $fdisplay(thm_logf, "OLD_BURST1 t=%0t slot=%0d q1ts=%0d curts=%0d tid=%0d",
+                $time, i, q1_ts[i*6 +: 6],
+                ready_curts[q1_tid[i*6 +: 6]*6 +: 6], q1_tid[i*6 +: 6]);
+        end
+        if (emit_eu_vld0 || emit_eu_vld1) begin
             burst_iv_t eb;
-            if (emit_cu_vld1) begin
-                eb = emit_cu_burst1;
-                $fdisplay(thm_logf, "EMIT_CU1 t=%0t tid=%0d ts=%0d st=%0d tr=%0d ts_len=%0d branch=%0d vld=%0d tsk=%0d/%0d c=%0d/%0d spc=%0d/%0d pc=%0d need=%0d tscnt=%0d",
-                $time, emit_cu_tid1, ready_curts[emit_cu_tid1*6 +: 6],
+            if (emit_eu_vld1) begin
+                eb = emit_eu_burst1;
+                $fdisplay(thm_logf, "EMIT_EU1 t=%0t tid=%0d ts=%0d st=%0d tr=%0d ts_len=%0d branch=%0d vld=%0d tsk=%0d/%0d c=%0d/%0d pc=%0d need=%0d tscnt=%0d",
+                $time, emit_eu_tid1, ready_curts[emit_eu_tid1*6 +: 6],
                 eb.st, eb.tr, eb.ts_len, eb.branch, eb.vld_cu,
-                eb.tsk_id0, eb.tsk_id1, eb.c0, eb.c1, eb.sub_pc0, eb.sub_pc1,
-                u_thm.th_bs_pc[emit_cu_tid1], u_thm.th_need[emit_cu_tid1][u_thm.th_ts_idx[emit_cu_tid1]],
-                u_thm.th_ts_n[emit_cu_tid1]);
+                eb.tsk_id0, eb.tsk_id1, eb.c0, eb.c1,
+                u_thm.th_bs_pc[emit_eu_tid1], u_thm.th_need[emit_eu_tid1][u_thm.th_ts_idx[emit_eu_tid1]],
+                u_thm.th_ts_n[emit_eu_tid1]);
             end else begin
-                eb = emit_cu_burst0;
-                $fdisplay(thm_logf, "EMIT_CU t=%0t tid=%0d ts=%0d st=%0d tr=%0d ts_len=%0d branch=%0d vld=%0d tsk=%0d/%0d c=%0d/%0d spc=%0d/%0d pc=%0d need=%0d tscnt=%0d",
-                $time, emit_cu_tid0, ready_curts[emit_cu_tid0*6 +: 6],
+                eb = emit_eu_burst0;
+                $fdisplay(thm_logf, "EMIT_EU t=%0t tid=%0d ts=%0d st=%0d tr=%0d ts_len=%0d branch=%0d vld=%0d tsk=%0d/%0d c=%0d/%0d pc=%0d need=%0d tscnt=%0d",
+                $time, emit_eu_tid0, ready_curts[emit_eu_tid0*6 +: 6],
                 eb.st, eb.tr, eb.ts_len, eb.branch, eb.vld_cu,
-                eb.tsk_id0, eb.tsk_id1, eb.c0, eb.c1, eb.sub_pc0, eb.sub_pc1,
-                u_thm.th_bs_pc[emit_cu_tid0], u_thm.th_need[emit_cu_tid0][u_thm.th_ts_idx[emit_cu_tid0]],
-                u_thm.th_ts_n[emit_cu_tid0]);
+                eb.tsk_id0, eb.tsk_id1, eb.c0, eb.c1,
+                u_thm.th_bs_pc[emit_eu_tid0], u_thm.th_need[emit_eu_tid0][u_thm.th_ts_idx[emit_eu_tid0]],
+                u_thm.th_ts_n[emit_eu_tid0]);
             end
         end
-        if (emit_dma_vld) begin
-            burst_c_t eb;
-            eb = emit_dma_burst;
-            $fdisplay(thm_logf, "EMIT_DMA t=%0t tid=%0d dma_id=%0d/%0d occ_ts=%0d/%0d vld=%0d c=%0d/%0d pre=%0d",
-            $time, emit_dma_tid, eb.dma_id0, eb.dma_id1, eb.occ_ts0, eb.occ_ts1,
-            eb.vld_cu, eb.c0, eb.c1, emit_dma_pre);
-        end
+        for (int d = 0; d < 4; d++)
+            if (emit_dma_vld[d])
+                $fdisplay(thm_logf, "EMIT_DMA t=%0t dse=%0d tid=%0d tidx=%0d dma_id=%0d tag=%0d op=%0d",
+                $time, d, emit_dma_tid[d*6 +: 6], emit_dma_tidx[d*4 +: 4],
+                emit_dma_dma_id[d*3 +: 3], emit_dma_tag[d*2 +: 2], emit_dma_op[d]);
         if (iss_vld0)
             $fdisplay(thm_logf, "ISS0 t=%0t tid=%0d curts=%0d burst_ts=%0d pc=%0d need=%0d tscnt=%0d st=%0d",
         $time, iss_tid0, ready_curts[iss_tid0*6 +: 6],
@@ -268,30 +307,33 @@ module tb_top;
         ready_burst_ts[iss_tid1*6 +: 6],
         u_thm.th_bs_pc[iss_tid1], u_thm.th_need[iss_tid1][u_thm.th_ts_idx[iss_tid1]],
             u_thm.th_ts_n[iss_tid1], u_thm.th_state[iss_tid1]);
-        if (cu_done_vld0)
-            $fdisplay(thm_logf, "DONE t=%0t tid=%0d curts=%0d csr_curts=%0d done=%0d need=%0d tscnt=%0d pc=%0d st=%0d",
-        $time, cu_done_tid0, ready_curts[cu_done_tid0*6 +: 6],
-            u_thm.csr[cu_done_tid0].cur_ts,
-        u_thm.th_done_acc[cu_done_tid0][u_thm.th_ts_idx[cu_done_tid0]],
-        u_thm.th_need[cu_done_tid0][u_thm.th_ts_idx[cu_done_tid0]],
-            u_thm.th_ts_n[cu_done_tid0], u_thm.th_bs_pc[cu_done_tid0],
-            u_thm.th_state[cu_done_tid0]);
-        if (cu_done_vld1)
-            $fdisplay(thm_logf, "DONE1 t=%0t tid=%0d curts=%0d csr_curts=%0d done=%0d need=%0d tscnt=%0d pc=%0d st=%0d",
-        $time, cu_done_tid1, ready_curts[cu_done_tid1*6 +: 6],
-            u_thm.csr[cu_done_tid1].cur_ts,
-        u_thm.th_done_acc[cu_done_tid1][u_thm.th_ts_idx[cu_done_tid1]],
-        u_thm.th_need[cu_done_tid1][u_thm.th_ts_idx[cu_done_tid1]],
-            u_thm.th_ts_n[cu_done_tid1], u_thm.th_bs_pc[cu_done_tid1],
-            u_thm.th_state[cu_done_tid1]);
-        if (dma_done_vld)
-            $fdisplay(thm_logf, "DONE_DMA t=%0t tid=%0d curts=%0d csr_curts=%0d done=%0d need=%0d tscnt=%0d pc=%0d st=%0d",
-        $time, dma_done_tid, ready_curts[dma_done_tid*6 +: 6],
-            u_thm.csr[dma_done_tid].cur_ts,
-        u_thm.th_done_acc[dma_done_tid][u_thm.th_ts_idx[dma_done_tid]],
-        u_thm.th_need[dma_done_tid][u_thm.th_ts_idx[dma_done_tid]],
-            u_thm.th_ts_n[dma_done_tid], u_thm.th_bs_pc[dma_done_tid],
-            u_thm.th_state[dma_done_tid]);
+        if (eu_done_vld0)
+            $fdisplay(thm_logf, "DONE_EU0 t=%0t tid=%0d curts=%0d csr_curts=%0d done=%0d need=%0d tscnt=%0d pc=%0d st=%0d",
+        $time, eu_done_tid0, ready_curts[eu_done_tid0*6 +: 6],
+            u_thm.csr[eu_done_tid0].cur_ts,
+        u_thm.th_done_acc[eu_done_tid0][u_thm.th_ts_idx[eu_done_tid0]],
+        u_thm.th_need[eu_done_tid0][u_thm.th_ts_idx[eu_done_tid0]],
+            u_thm.th_ts_n[eu_done_tid0], u_thm.th_bs_pc[eu_done_tid0],
+            u_thm.th_state[eu_done_tid0]);
+        if (eu_done_vld1)
+            $fdisplay(thm_logf, "DONE_EU1 t=%0t tid=%0d curts=%0d csr_curts=%0d done=%0d need=%0d tscnt=%0d pc=%0d st=%0d",
+        $time, eu_done_tid1, ready_curts[eu_done_tid1*6 +: 6],
+            u_thm.csr[eu_done_tid1].cur_ts,
+        u_thm.th_done_acc[eu_done_tid1][u_thm.th_ts_idx[eu_done_tid1]],
+        u_thm.th_need[eu_done_tid1][u_thm.th_ts_idx[eu_done_tid1]],
+            u_thm.th_ts_n[eu_done_tid1], u_thm.th_bs_pc[eu_done_tid1],
+            u_thm.th_state[eu_done_tid1]);
+        for (int d = 0; d < 4; d++)
+            if (dma_done_vld[d]) begin
+                automatic logic [5:0] dt = dma_done_tid[d*6 +: 6];
+                $fdisplay(thm_logf, "DONE_DMA t=%0t dse=%0d tid=%0d curts=%0d csr_curts=%0d done=%0d need=%0d tscnt=%0d pc=%0d st=%0d",
+                $time, d, dt, ready_curts[dt*6 +: 6],
+                    u_thm.csr[dt].cur_ts,
+                u_thm.th_done_acc[dt][u_thm.th_ts_idx[dt]],
+                u_thm.th_need[dt][u_thm.th_ts_idx[dt]],
+                    u_thm.th_ts_n[dt], u_thm.th_bs_pc[dt],
+                    u_thm.th_state[dt]);
+            end
     end
 
 
@@ -338,11 +380,32 @@ module tb_top;
     final begin
         integer i;
         int idle;
+        int n_ready, n_issued, n_done;
         idle = 0;
+        n_ready = 0; n_issued = 0; n_done = 0;
         for (i = 0; i < 64; i++) begin
             if (u_thm.th_state[i] == 2'd0) idle++;
+            else if (u_thm.th_state[i] == 2'd1) n_ready++;
+            else if (u_thm.th_state[i] == 2'd2) n_issued++;
+            else n_done++;
         end
         // 校验：所有线程应回到 IDLE（C 窗为纯数据存储，无 loc/free 占用状态）
-        $fdisplay(thm_logf, "FINAL idle=%0d dma_st=%0d", idle, u_dma.st);
+        $fdisplay(thm_logf, "FINAL idle=%0d ready=%0d issued=%0d done=%0d dma_st=%0d",
+                  idle, n_ready, n_issued, n_done, u_dma0.st);
+        for (i = 0; i < 64; i++)
+            if (u_thm.th_state[i] != 2'd0)
+                $fdisplay(thm_logf, "NONIDLE tid=%0d st=%0d curts=%0d pc=%0d",
+                          i, u_thm.th_state[i], u_thm.th_cur_ts[i], u_thm.th_bs_pc[i]);
+        // 槽池残留转储（定位无法发射的 burst）
+        for (i = 0; i < 8; i++) begin
+            if (q0_vld[i])
+                $fdisplay(thm_logf, "POOL0 slot=%0d tid=%0d ts=%0d tidx=%0d curts=%0d pri=%0d",
+                          i, q0_tid[i*6 +: 6], q0_ts[i*6 +: 6], q0_tidx[i*4 +: 4],
+                          ready_curts[q0_tid[i*6 +: 6]*6 +: 6], q0_pri[i*3 +: 3]);
+            if (q1_vld[i])
+                $fdisplay(thm_logf, "POOL1 slot=%0d tid=%0d ts=%0d tidx=%0d curts=%0d pri=%0d",
+                          i, q1_tid[i*6 +: 6], q1_ts[i*6 +: 6], q1_tidx[i*4 +: 4],
+                          ready_curts[q1_tid[i*6 +: 6]*6 +: 6], q1_pri[i*3 +: 3]);
+        end
     end
 endmodule
