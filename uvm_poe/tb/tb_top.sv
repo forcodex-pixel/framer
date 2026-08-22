@@ -112,6 +112,8 @@ module tb_top;
     logic [7:0] emit_dma_tag;
     logic [3:0] emit_dma_op;
     logic [3:0] dma_full;
+    logic [3:0] rba_bp;
+    logic [27:0] rba_cnt;
     logic [3:0] dma_done_vld;
     logic [23:0] dma_done_tid;
     logic [15:0] dma_done_tidx;
@@ -221,16 +223,26 @@ module tb_top;
     .push_dma_id(emit_dma_dma_id),
     .push_tag(emit_dma_tag),
     .push_op(emit_dma_op),
-    .fifo_full(dma_full)
+    .fifo_full(dma_full),
+    .rba_bp(rba_bp),
+    .rba_cnt(rba_cnt)
     );
 
     // O 窗反压占位：固定 0（O 窗池设计后续补充）
     assign owin_bp = 1'b0;
     // ---- 临时调试日志 ----
     integer thm_logf;
+    logic [3:0] rba_bp_prev;
     initial thm_logf = $fopen("thm_dbg.log", "w");
     always @(posedge clk) begin
         burst_c_t cb0, cb1;
+        // RBA 反压事件（复位握手后才有意义）
+        if (rst_n && (rba_bp !== rba_bp_prev)) begin
+            $fdisplay(thm_logf, "RBA_BP t=%0t bp=%b cnt=%0d/%0d/%0d/%0d",
+            $time, rba_bp, rba_cnt[6:0], rba_cnt[13:7],
+            rba_cnt[20:14], rba_cnt[27:21]);
+            rba_bp_prev = rba_bp;
+        end
         // 槽池异常检查：vld 且非 pre 且 ts < cur_ts
         for (int i = 0; i < 8; i++) begin
             if (q0_vld[i] && !q0_pre[i] &&

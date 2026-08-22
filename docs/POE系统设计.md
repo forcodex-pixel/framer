@@ -224,6 +224,14 @@ c_task 留在缓存下拍重选）；每个 FIFO 每拍出队 1 个（模型化�
 
 同地址互斥由 THM 锁在一级发射保证。
 
+### 9.2 RBA 读写机会（poe_rba）
+
+- 4 个计数（每 DSE 1 个，对应 c_task FIFO），初始各 64 个读写机会；
+- dma 每出队 1 个 c_task（发起 1 次读/写请求），对应计数 -1；
+- 请求后随机 70~75 拍释放读写机会，计数 +1；
+- 计数为 0 时 `rdy=0` 反压：dma_ctrl 停止出队 → FIFO 填满 → 二级发射被反压；
+- 参数：`CREDITS=64`、`DELAY_MIN=70`、`DELAY_MAX=75`，`rba_bp/rba_cnt` 可观测。
+
 完成反馈：`dma_done{vld, tid, ts_idx}`（4 路，每 DSE 1 路，发射后 1 拍）。
 
 ## 10. UVM 平台
@@ -244,6 +252,7 @@ c_task 留在缓存下拍重选）；每个 FIFO 每拍出队 1 个（模型化�
 | i/v 槽池（q0/q1） | 8 深 ×2（槽项含 pri） |
 | c_task 缓存 | 16 深（解析后的单 task：pri/tid/tidx/ts/dma_id/tag/op） |
 | dma_ctrl c_task FIFO | 4 个（每 DSE 1 个，8 深；满则反压二级发射） |
+| RBA 读写机会 | 4 个计数（初始 64；请求 -1，70~75 拍归还 +1；为 0 反压） |
 | 执行单元 | EU ×2（各 4 个 CU 桩）；c_task 无执行单元（二级发射即 done） |
 | burst 位宽 | 38bit |
 | 锁表 | 16 × 6bit |
