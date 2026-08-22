@@ -38,7 +38,7 @@ KOA（5×SBUF × 8 优先级段，SP+RR 调度）
 THM（线程池 64，保序 8 深缓存，模板池取线程描述）
    │  ready_mask/ready_burst（38bit）
    ▼
-th_sch（一级发射，全局 (pri,tid) 取前 2，动态 lane，每拍 ≤2）
+th_sch（一级发射，全局 (pri,tid) 取前 2，每拍 ≤2）
    │  q0/q1 burst 队列（8 深）
    ▼
 burst_sch（二级发射，ts==cur_ts 等条件）
@@ -82,6 +82,9 @@ burst_sch（二级发射，ts==cur_ts 等条件）
 
 - 线程 = 若干 ts（1..16，编号可跳转），每个 ts = 若干 burst（1..4）；
 - ts0 固定 1 个单 i_task burst；
+- 同一配对（同 tag/同锁）的 c_task loc/free 有先后依赖，分处**不同 ts**，
+  顺序由 burst_sch 的 `ts == cur_ts` 检查保证；不同锁/不同 tag 的 loc/free
+  相互独立，无先后要求；
 - 每 ts 首个 burst（st=1）可声明 ts 级锁操作；
 - 线程描述（ts 数/编号/burst 模式/pri/vtsk_c/dma_c/cw）由 THM 从模板池随机选取。
 
@@ -178,10 +181,10 @@ th_need[ts] / th_off / th_sel_ts / th_sel_idx`。
 ## 6. th_sch（一级发射）
 
 - 每拍**全局**按 `(pri, tid)` 取前 2 个 READY 线程发射（无奇偶分组）；
-- **动态 lane**：线程首次发射时分配 q0/q1（轮转平衡），此后该线程 burst 固定进
-  同一 lane——队列 FIFO 保证线程内 burst 顺序（c_task loc/free 配对依赖，跨队列
-  交错会破坏 lock 先于 free 的执行序）；两 winner 默认分属不同队列，同 lane
-  冲突时只发高优先者（低者保持 READY，下一拍重选）；
+- 路由：winner0 → q0、winner1 → q1（各受队列满反压），**不做线程固定 lane**；
+  线程内 burst 顺序由 ts 机制保证：同一配对（同 tag/同锁）的 loc/free 分处
+  不同 ts，burst_sch 按 `ts == cur_ts` 发射，free 必然在 loc 完成后才放行；
+  不同锁/不同 tag 的 loc/free 相互独立，无先后要求；
 - 队列项：`{pre, burst(38), burst_ts(6), ts_idx(4), th_id(6)}`（55bit，8 深 ×2）；
 - 完成反馈携带 ts_idx（发射时随 burst 下发）。
 
@@ -190,6 +193,7 @@ th_need[ts] / th_off / th_sel_ts / th_sel_idx`。
 从 q0/q1 各自独立判断队头可发射，每拍 ≤2：
 
 - 公共条件：`ts == 线程当前 cur_ts`（pre 插队跳过）、非 O 窗反压；
+  依赖 burst 分处不同 ts，该条件保证 loc/free 等先后顺序；
 - c_task 附加：无需资源预检——C 窗每线程独享 8 个固定位置，loc/free 由 ts 级
   互斥锁保证成对与互斥，只要满足公共条件即放行；
 - 路由：i/v → CU0/CU1；c_task → dma_ctrl（dma 单路，双 c_task 同拍只发 q0）。

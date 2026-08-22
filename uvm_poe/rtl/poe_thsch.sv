@@ -1,10 +1,10 @@
 // POE th_sch（一级发射调度器）行为模型：
 // - 每拍从 READY 线程按 (pri, tid) 排序固定发射 ≤2 个：先按优先级（值小优先），
 //   同优先级按 tid 小者优先；**全局取前 2 名**（无奇偶分组）
-// - lane 分配：线程首次发射时动态分配 q0/q1（轮转平衡），此后该线程的 burst
-//   固定进同一 lane——同一线程的 burst 永远进同一队列，队列 FIFO 保证线程内
-//   burst 顺序（c_task 的 loc/free 配对依赖该顺序，跨队列交错会破坏 lock 先于
-//   free 的执行序）；两个 winner 默认分属不同队列，同 lane 冲突时只发高优先者
+// - 路由：winner0 → q0、winner1 → q1（各受队列满反压），不做线程固定 lane；
+//   线程内 burst 顺序由 ts 机制保证：同一配对（同 tag/同锁）的 loc/free 有先后
+//   依赖，分处不同 ts，burst_sch 按 `ts == cur_ts` 发射，free 必然在 loc 完成后
+//   才放行；不同锁/不同 tag 的 loc/free 相互独立，无先后要求
 // - 发射的 burst 写入 2 个 burst 队列（深度 QDEPTH），队列项携带：
 //   {pre, burst(38b), burst_ts, ts_idx(4b), th_id(6b)}（ts_idx 供 CU/dma 完成反馈归属）
 //   - burst：THM ready_burst（bs_pc 索引，38bit；burst_type 区分 i/v 与 c_task 字段）
@@ -57,10 +57,6 @@ module poe_thsch #(
     logic [QW-1:0] q1_mem [QDEPTH];
     logic [PTR_W-1:0] q1_head, q1_tail;
     logic [PTR_W:0] q1_cnt;
-    // ---- 每线程 lane（首次发射时分配，此后固定；0=q0，1=q1） ----
-    logic [MAX_THREADS-1:0] th_lane_used;
-    logic [MAX_THREADS-1:0] th_lane;
-    logic lane_rr; // 新线程 lane 轮转指针（平衡 q0/q1 负载）
 
     logic iss0, iss1;
     int tid0, tid1;
@@ -83,12 +79,6 @@ module poe_thsch #(
             end
     end
 
-    // ---- 本拍两个 winner 的目标 lane（未分配 → 动态分配；两 winner 尽量异 lane） ----
-    logic l0, l1;
-    assign l0 = th_lane_used[tid0] ? th_lane[tid0] : lane_rr;
-    assign l1 = th_lane_used[tid1] ? th_lane[tid1] :
-                (th_lane_used[tid0] ? !th_lane[tid0] : !lane_rr);
-
     assign q0_vld = (q0_cnt != 0);
     assign q1_vld = (q1_cnt != 0);
     assign q0_tid = q0_mem[q0_head][5:0];
@@ -102,70 +92,36 @@ module poe_thsch #(
     assign q1_burst = q1_mem[q1_head][QW-2:TS_ID_W+10];
     assign q1_pre = q1_mem[q1_head][QW-1];
 
-    // 发射使能：目标 lane 队列未满；两 winner 同 lane 时只发高优先者
-    logic l0_avail, l1_avail;
-    assign l0_avail = l0 ? (q1_cnt != QDEPTH) : (q0_cnt != QDEPTH);
-    assign l1_avail = l1 ? (q1_cnt != QDEPTH) : (q0_cnt != QDEPTH);
-    assign iss_vld0 = iss0 && l0_avail;
+    // 发射使能：各目标队列未满（winner0→q0、winner1→q1）
+    assign iss_vld0 = iss0 && (q0_cnt != QDEPTH);
     assign iss_tid0 = tid0[5:0];
-    assign iss_vld1 = iss1 && l1_avail && (l1 != l0 || !iss_vld0);
+    assign iss_vld1 = iss1 && (q1_cnt != QDEPTH);
     assign iss_tid1 = tid1[5:0];
 
-    // ---- 写队列路由：winner0/winner1 各进其 lane ----
-    logic q0_wr_a, q1_wr_a, q0_wr_b, q1_wr_b;
-    assign q0_wr_a = iss_vld0 && !l0;
-    assign q1_wr_a = iss_vld0 && l0;
-    assign q0_wr_b = iss_vld1 && !l1;
-    assign q1_wr_b = iss_vld1 && l1;
     logic q0_wr, q1_wr;
-    assign q0_wr = q0_wr_a || q0_wr_b;
-    assign q1_wr = q1_wr_a || q1_wr_b;
+    assign q0_wr = iss_vld0; // winner0 → q0
+    assign q1_wr = iss_vld1; // winner1 → q1
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             q0_head <= '0; q0_tail <= '0; q0_cnt <= '0;
             q1_head <= '0; q1_tail <= '0; q1_cnt <= '0;
-            th_lane_used <= '0;
-            th_lane <= '0;
-            lane_rr <= 1'b0;
         end else begin
             // 发射写队列（一级发射）
-            if (q0_wr_a)
+            if (q0_wr) begin
                 q0_mem[q0_tail] <= {1'b0,
                 ready_burst[tid0*BURST_W +: BURST_W],
                 ready_burst_ts[tid0*TS_ID_W +: TS_ID_W],
                 ready_burst_tidx[tid0*4 +: 4], tid0[5:0]};
-            if (q0_wr_b)
-                q0_mem[q0_tail] <= {1'b0,
-                ready_burst[tid1*BURST_W +: BURST_W],
-                ready_burst_ts[tid1*TS_ID_W +: TS_ID_W],
-                ready_burst_tidx[tid1*4 +: 4], tid1[5:0]};
-            if (q0_wr)
                 q0_tail <= (q0_tail == QDEPTH-1) ? '0 : q0_tail + 1'b1;
-            if (q1_wr_a)
-                q1_mem[q1_tail] <= {1'b0,
-                ready_burst[tid0*BURST_W +: BURST_W],
-                ready_burst_ts[tid0*TS_ID_W +: TS_ID_W],
-                ready_burst_tidx[tid0*4 +: 4], tid0[5:0]};
-            if (q1_wr_b)
+            end
+            if (q1_wr) begin
                 q1_mem[q1_tail] <= {1'b0,
                 ready_burst[tid1*BURST_W +: BURST_W],
                 ready_burst_ts[tid1*TS_ID_W +: TS_ID_W],
                 ready_burst_tidx[tid1*4 +: 4], tid1[5:0]};
-            if (q1_wr)
                 q1_tail <= (q1_tail == QDEPTH-1) ? '0 : q1_tail + 1'b1;
-            // 首发射时分配 lane（此后固定，保持线程内 burst 顺序）
-            if (iss_vld0 && !th_lane_used[tid0]) begin
-                th_lane_used[tid0] <= 1'b1;
-                th_lane[tid0] <= l0;
             end
-            if (iss_vld1 && !th_lane_used[tid1]) begin
-                th_lane_used[tid1] <= 1'b1;
-                th_lane[tid1] <= l1;
-            end
-            lane_rr <= lane_rr
-                       ^ (iss_vld0 && !th_lane_used[tid0])
-                       ^ (iss_vld1 && !th_lane_used[tid1]);
             // burst_sch 读
             if (q0_ack && q0_vld) begin
                 q0_head <= (q0_head == QDEPTH-1) ? '0 : q0_head + 1'b1;
