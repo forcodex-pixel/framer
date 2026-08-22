@@ -233,9 +233,32 @@ module tb_top;
     // ---- 临时调试日志 ----
     integer thm_logf;
     logic [3:0] rba_bp_prev;
+    integer rba_bp_cyc [4];
+    integer fifo_full_cyc [4];
+    integer ct_occ_peak;
+    integer ct_full_ev;
+    integer q0_occ_peak;
+    integer q1_occ_peak;
     initial thm_logf = $fopen("thm_dbg.log", "w");
     always @(posedge clk) begin
         burst_c_t cb0, cb1;
+        integer ct_occ;
+        integer q0_occ, q1_occ;
+        ct_occ = 0; q0_occ = 0; q1_occ = 0;
+        for (int i = 0; i < 16; i++)
+            if (ct_vld[i]) ct_occ++;
+        for (int i = 0; i < 8; i++) begin
+            if (q0_vld[i]) q0_occ++;
+            if (q1_vld[i]) q1_occ++;
+        end
+        if (ct_occ > ct_occ_peak) ct_occ_peak = ct_occ;
+        if (ct_occ == 16) ct_full_ev++;
+        if (q0_occ > q0_occ_peak) q0_occ_peak = q0_occ;
+        if (q1_occ > q1_occ_peak) q1_occ_peak = q1_occ;
+        for (int d = 0; d < 4; d++) begin
+            if (rba_bp[d]) rba_bp_cyc[d]++;
+            if (dma_full[d]) fifo_full_cyc[d]++;
+        end
         // RBA 反压事件（复位握手后才有意义）
         if (rst_n && (rba_bp !== rba_bp_prev)) begin
             $fdisplay(thm_logf, "RBA_BP t=%0t bp=%b cnt=%0d/%0d/%0d/%0d",
@@ -378,6 +401,11 @@ module tb_top;
         // 校验：所有线程应回到 IDLE（C 窗为纯数据存储，无 loc/free 占用状态）
         $fdisplay(thm_logf, "FINAL idle=%0d ready=%0d issued=%0d done=%0d",
                   idle, n_ready, n_issued, n_done);
+        $fdisplay(thm_logf, "BP RBA_cyc=%0d/%0d/%0d/%0d FIFO_full_cyc=%0d/%0d/%0d/%0d",
+                  rba_bp_cyc[0], rba_bp_cyc[1], rba_bp_cyc[2], rba_bp_cyc[3],
+                  fifo_full_cyc[0], fifo_full_cyc[1], fifo_full_cyc[2], fifo_full_cyc[3]);
+        $fdisplay(thm_logf, "BP ct_peak=%0d ct_full_ev=%0d q0_peak=%0d q1_peak=%0d",
+                  ct_occ_peak, ct_full_ev, q0_occ_peak, q1_occ_peak);
         for (i = 0; i < 64; i++)
             if (u_thm.th_state[i] != 2'd0)
                 $fdisplay(thm_logf, "NONIDLE tid=%0d st=%0d curts=%0d pc=%0d",

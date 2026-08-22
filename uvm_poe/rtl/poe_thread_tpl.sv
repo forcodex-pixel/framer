@@ -5,10 +5,10 @@
 //
 // 线程模板字段（与 THM 建线程所需一致）：
 //   ts_cnt      ts 数（1..16）
-//   ts_bs       每 ts burst 数（16×3bit，ts0 固定 1）
+//   ts_bs       每 ts burst 数（16×4bit，0..8，ts0 固定 1）
 //   ts_id       每 ts 编号（16×6bit，递增可跳转，模拟 ts 跳转）
 //   pri         线程 burst 优先级（0 最高）
-//   burst_seq   每 ts burst 模式（16 ts × 4 burst × 38bit，含 ts 级锁字段）
+//   burst_seq   每 ts burst 模式（16 ts × 8 burst × 38bit，含 ts 级锁字段）
 //   vtsk_c      CSR vtsk_c：i/v 任务执行掩码
 //   dma_c       CSR dma_c：c_task 执行指示（8bit 掩码，对应 cw 8 项）
 //   cw          CSR cw：c_task 操作表（8×6B，条目 48bit）
@@ -21,13 +21,13 @@ package poe_thread_tpl_pkg;
     import poe_types_pkg::*;
 
     localparam int TPL_MAX_TS = 16;
-    localparam int TPL_MAX_BURST = 4;
+    localparam int TPL_MAX_BURST = 8; // 每 ts 最多 burst 数
 
-    // ---- 线程模板（打包结构，位宽 = 2984bit） ----
+    // ---- 线程模板（打包结构） ----
     typedef struct packed {
         logic [4:0] ts_cnt; // ts 数（1..16）
         logic [2:0] pri; // 优先级
-        logic [TPL_MAX_TS*3-1:0] ts_bs; // 每 ts burst 数
+        logic [TPL_MAX_TS*4-1:0] ts_bs; // 每 ts burst 数（0..8）
         logic [TPL_MAX_TS*6-1:0] ts_id; // 每 ts 编号
         logic [TPL_MAX_TS*TPL_MAX_BURST*BURST_W-1:0] burst_seq; // 每 ts burst 模式
         logic [7:0] vtsk_c;
@@ -35,7 +35,7 @@ package poe_thread_tpl_pkg;
         logic [383:0] cw; // 8×6B
     } thread_tpl_t;
 
-    localparam int N_TPL = 6; // 模板数量
+    localparam int N_TPL = 9; // 模板数量（T0..T8）
 
     // ==================== 辅助构造函数 ====================
 
@@ -112,11 +112,19 @@ package poe_thread_tpl_pkg;
         tpl_cw_entry = ce;
     endfunction
 
-    // 把 4 个 burst 写入模板第 k 个 ts（每 ts 152bit）
+    // 把 8 个 burst 写入模板第 k 个 ts（每 ts 8×38bit；未用槽填 '0）
+    function automatic void tpl_put_ts8(inout thread_tpl_t t, input int k,
+        input logic [BURST_W-1:0] b0, input logic [BURST_W-1:0] b1,
+        input logic [BURST_W-1:0] b2, input logic [BURST_W-1:0] b3,
+        input logic [BURST_W-1:0] b4, input logic [BURST_W-1:0] b5,
+        input logic [BURST_W-1:0] b6, input logic [BURST_W-1:0] b7);
+        t.burst_seq[k*(8*BURST_W) +: 8*BURST_W] = {b7, b6, b5, b4, b3, b2, b1, b0};
+    endfunction
+    // 兼容 4 参数调用（写入低 4 槽）
     function automatic void tpl_put_ts(inout thread_tpl_t t, input int k,
         input logic [BURST_W-1:0] b0, input logic [BURST_W-1:0] b1,
         input logic [BURST_W-1:0] b2, input logic [BURST_W-1:0] b3);
-        t.burst_seq[k*(4*BURST_W) +: 4*BURST_W] = {b3, b2, b1, b0};
+        tpl_put_ts8(t, k, b0, b1, b2, b3, '0, '0, '0, '0);
     endfunction
 
     // ==================== 模板定义 ====================
@@ -127,8 +135,8 @@ package poe_thread_tpl_pkg;
         t = '0;
         t.ts_cnt = 5'd2;
         t.pri = 3'd1;
-        t.ts_bs[2:0] = 3'd1; // ts0 固定 1
-        t.ts_bs[5:3] = 3'd2; // ts1 2 条
+        t.ts_bs[3:0] = 4'd1; // ts0 固定 1
+        t.ts_bs[7:4] = 4'd2; // ts1 2 条
         t.ts_id[5:0] = 6'd0;
         t.ts_id[11:6] = 6'd1;
         tpl_put_ts(t, 0, tpl_iv(1'b1, 3'd1, 1'b0, 1'b0, 3'd0), '0, '0, '0);
@@ -147,10 +155,10 @@ package poe_thread_tpl_pkg;
         t = '0;
         t.ts_cnt = 5'd4;
         t.pri = 3'd2;
-        t.ts_bs[2:0] = 3'd1;
-        t.ts_bs[5:3] = 3'd2;
-        t.ts_bs[8:6] = 3'd2;
-        t.ts_bs[11:9] = 3'd1;
+        t.ts_bs[3:0] = 4'd1;
+        t.ts_bs[7:4] = 4'd2;
+        t.ts_bs[11:8] = 4'd2;
+        t.ts_bs[15:12] = 4'd1;
         t.ts_id[5:0] = 6'd0;
         t.ts_id[11:6] = 6'd1;
         t.ts_id[17:12] = 6'd2;
@@ -178,14 +186,14 @@ package poe_thread_tpl_pkg;
         t.ts_cnt = 5'd8;
         t.pri = 3'd3;
         // 每 ts burst 数
-        t.ts_bs[2:0] = 3'd1;
-        t.ts_bs[5:3] = 3'd2;
-        t.ts_bs[8:6] = 3'd1;
-        t.ts_bs[11:9] = 3'd2;
-        t.ts_bs[14:12] = 3'd1;
-        t.ts_bs[17:15] = 3'd2;
-        t.ts_bs[20:18] = 3'd2;
-        t.ts_bs[23:21] = 3'd1;
+        t.ts_bs[3:0] = 4'd1;
+        t.ts_bs[7:4] = 4'd2;
+        t.ts_bs[11:8] = 4'd1;
+        t.ts_bs[15:12] = 4'd2;
+        t.ts_bs[19:16] = 4'd1;
+        t.ts_bs[23:20] = 4'd2;
+        t.ts_bs[27:24] = 4'd2;
+        t.ts_bs[31:28] = 4'd1;
         // ts 编号递增可跳转（模拟跳转目标）
         t.ts_id[5:0] = 6'd0;
         t.ts_id[11:6] = 6'd1;
@@ -225,12 +233,12 @@ package poe_thread_tpl_pkg;
         t = '0;
         t.ts_cnt = 5'd6;
         t.pri = 3'd0;
-        t.ts_bs[2:0] = 3'd1;
-        t.ts_bs[5:3] = 3'd2;
-        t.ts_bs[8:6] = 3'd2;
-        t.ts_bs[11:9] = 3'd2;
-        t.ts_bs[14:12] = 3'd3;
-        t.ts_bs[17:15] = 3'd2;
+        t.ts_bs[3:0] = 4'd1;
+        t.ts_bs[7:4] = 4'd2;
+        t.ts_bs[11:8] = 4'd2;
+        t.ts_bs[15:12] = 4'd2;
+        t.ts_bs[19:16] = 4'd3;
+        t.ts_bs[23:20] = 4'd2;
         t.ts_id[5:0] = 6'd0;
         t.ts_id[11:6] = 6'd1;
         t.ts_id[17:12] = 6'd2;
@@ -274,11 +282,11 @@ package poe_thread_tpl_pkg;
         t = '0;
         t.ts_cnt = 5'd5;
         t.pri = 3'd2;
-        t.ts_bs[2:0] = 3'd1;
-        t.ts_bs[5:3] = 3'd2;
-        t.ts_bs[8:6] = 3'd1;
-        t.ts_bs[11:9] = 3'd2;
-        t.ts_bs[14:12] = 3'd1;
+        t.ts_bs[3:0] = 4'd1;
+        t.ts_bs[7:4] = 4'd2;
+        t.ts_bs[11:8] = 4'd1;
+        t.ts_bs[15:12] = 4'd2;
+        t.ts_bs[19:16] = 4'd1;
         t.ts_id[5:0] = 6'd0;
         t.ts_id[11:6] = 6'd1;
         t.ts_id[17:12] = 6'd2;
@@ -312,13 +320,13 @@ package poe_thread_tpl_pkg;
         t = '0;
         t.ts_cnt = 5'd7;
         t.pri = 3'd4;
-        t.ts_bs[2:0] = 3'd1;
-        t.ts_bs[5:3] = 3'd2;
-        t.ts_bs[8:6] = 3'd1;
-        t.ts_bs[11:9] = 3'd1;
-        t.ts_bs[14:12] = 3'd2;
-        t.ts_bs[17:15] = 3'd2;
-        t.ts_bs[20:18] = 3'd1;
+        t.ts_bs[3:0] = 4'd1;
+        t.ts_bs[7:4] = 4'd2;
+        t.ts_bs[11:8] = 4'd1;
+        t.ts_bs[15:12] = 4'd1;
+        t.ts_bs[19:16] = 4'd2;
+        t.ts_bs[23:20] = 4'd2;
+        t.ts_bs[27:24] = 4'd1;
         t.ts_id[5:0] = 6'd0;
         t.ts_id[11:6] = 6'd1;
         t.ts_id[17:12] = 6'd2;
@@ -351,6 +359,103 @@ package poe_thread_tpl_pkg;
 
     // ==================== 池接口 ====================
 
+    // ---- T6：c_task 密集（16 ts，每 ts 8 burst：1 iv + 7 c_task，RBA/FIFO 高压力） ----
+    function automatic thread_tpl_t tpl_hp_c();
+        thread_tpl_t t;
+        automatic logic [19:0] tg;
+        t = '0;
+        t.ts_cnt = 5'd16;
+        t.pri = 3'd0;
+        t.ts_bs[3:0] = 4'd1;
+        for (int k = 1; k < 16; k++) t.ts_bs[k*4 +: 4] = 4'd8;
+        for (int k = 0; k < 16; k++) t.ts_id[k*6 +: 6] = k[5:0];
+        tpl_put_ts8(t, 0, tpl_iv(1'b1, 3'd1, 1'b0, 1'b0, 3'd0),
+                    '0, '0, '0, '0, '0, '0, '0);
+        for (int k = 1; k < 16; k++)
+            tpl_put_ts8(t, k,
+                tpl_iv(1'b1, 3'd7, 1'b0, 1'b0, 3'd0),
+                tpl_c(1'b0, 3'd0, 8'd4), tpl_c(1'b0, 3'd1, 8'd4),
+                tpl_c(1'b0, 3'd2, 8'd4), tpl_c(1'b0, 3'd3, 8'd4),
+                tpl_c(1'b0, 3'd4, 8'd4), tpl_c(1'b0, 3'd5, 8'd4),
+                tpl_c(1'b0, 3'd6, 8'd4));
+        t.vtsk_c = 8'hFF;
+        t.dma_c = 8'h7F; // dma0..6 有效
+        t.cw = '0;
+        tg = $urandom % 4; // 配对 1（dma0/1）
+        t.cw[47:0] = tpl_cw_entry(tg, 1'b0);
+        t.cw[95:48] = tpl_cw_entry(tg, 1'b1);
+        tg = $urandom % 4; // 配对 2（dma2/3）
+        t.cw[143:96] = tpl_cw_entry(tg, 1'b0);
+        t.cw[191:144] = tpl_cw_entry(tg, 1'b1);
+        tg = $urandom % 4; // 配对 3（dma4/5）
+        t.cw[239:192] = tpl_cw_entry(tg, 1'b0);
+        t.cw[287:240] = tpl_cw_entry(tg, 1'b1);
+        tg = $urandom % 4; // dma6 单条
+        t.cw[335:288] = tpl_cw_entry(tg, 1'b0);
+        tpl_hp_c = t;
+    endfunction
+
+    // ---- T7：i/v 密集（16 ts，每 ts 8 i/v burst，奇数 ts 第 6 条 branch，EU/队列高压力） ----
+    function automatic thread_tpl_t tpl_hp_iv();
+        thread_tpl_t t;
+        t = '0;
+        t.ts_cnt = 5'd16;
+        t.pri = 3'd1;
+        t.ts_bs[3:0] = 4'd1;
+        for (int k = 1; k < 16; k++) t.ts_bs[k*4 +: 4] = 4'd8;
+        for (int k = 0; k < 16; k++) t.ts_id[k*6 +: 6] = k[5:0];
+        tpl_put_ts8(t, 0, tpl_iv(1'b1, 3'd1, 1'b0, 1'b0, 3'd0),
+                    '0, '0, '0, '0, '0, '0, '0);
+        for (int k = 1; k < 16; k++)
+            tpl_put_ts8(t, k,
+                tpl_iv(1'b1, 3'd7, 1'b0, 1'b0, 3'd0),
+                tpl_iv(1'b0, 3'd7, 1'b0, 1'b0, 3'd1),
+                tpl_iv(1'b0, 3'd7, 1'b0, 1'b0, 3'd2),
+                tpl_iv(1'b0, 3'd7, 1'b0, 1'b0, 3'd3),
+                tpl_iv(1'b0, 3'd7, 1'b0, 1'b0, 3'd4),
+                tpl_iv(1'b0, 3'd7, (k[0] ? 1'b1 : 1'b0), 1'b0, 3'd5),
+                tpl_iv(1'b0, 3'd7, 1'b0, 1'b0, 3'd6),
+                tpl_iv(1'b0, 3'd7, 1'b0, 1'b0, 3'd7));
+        t.vtsk_c = 8'hFF;
+        t.dma_c = 8'h00;
+        t.cw = '0;
+        tpl_hp_iv = t;
+    endfunction
+
+    // ---- T8：混合（16 ts，每 ts 8 burst：4 i/v + 4 c_task 交替，中等压力） ----
+    function automatic thread_tpl_t tpl_hp_mix();
+        thread_tpl_t t;
+        automatic logic [19:0] tg;
+        t = '0;
+        t.ts_cnt = 5'd16;
+        t.pri = 3'd2;
+        t.ts_bs[3:0] = 4'd1;
+        for (int k = 1; k < 16; k++) t.ts_bs[k*4 +: 4] = 4'd8;
+        for (int k = 0; k < 16; k++) t.ts_id[k*6 +: 6] = k[5:0];
+        tpl_put_ts8(t, 0, tpl_iv(1'b1, 3'd1, 1'b0, 1'b0, 3'd0),
+                    '0, '0, '0, '0, '0, '0, '0);
+        for (int k = 1; k < 16; k++)
+            tpl_put_ts8(t, k,
+                tpl_iv(1'b1, 3'd7, 1'b0, 1'b0, 3'd0),
+                tpl_c(1'b0, 3'd0, 8'd4),
+                tpl_iv(1'b0, 3'd7, 1'b0, 1'b0, 3'd1),
+                tpl_c(1'b0, 3'd1, 8'd4),
+                tpl_iv(1'b0, 3'd7, 1'b0, 1'b0, 3'd2),
+                tpl_c(1'b0, 3'd2, 8'd4),
+                tpl_iv(1'b0, 3'd7, 1'b0, 1'b0, 3'd3),
+                tpl_c(1'b0, 3'd3, 8'd4));
+        t.vtsk_c = 8'hFF;
+        t.dma_c = 8'h0F; // dma0..3 有效
+        t.cw = '0;
+        tg = $urandom % 4; // 配对 1（dma0/1）
+        t.cw[47:0] = tpl_cw_entry(tg, 1'b0);
+        t.cw[95:48] = tpl_cw_entry(tg, 1'b1);
+        tg = $urandom % 4; // 配对 2（dma2/3）
+        t.cw[143:96] = tpl_cw_entry(tg, 1'b0);
+        t.cw[191:144] = tpl_cw_entry(tg, 1'b1);
+        tpl_hp_mix = t;
+    endfunction
+
     // 按索引取模板（越界回退到 T0）
     function automatic thread_tpl_t tpl_get(input int idx);
         case (idx)
@@ -360,6 +465,9 @@ package poe_thread_tpl_pkg;
             3: tpl_get = tpl_dma_dense();
             4: tpl_get = tpl_locked();
             5: tpl_get = tpl_double_lock();
+            6: tpl_get = tpl_hp_c();
+            7: tpl_get = tpl_hp_iv();
+            8: tpl_get = tpl_hp_mix();
             default: tpl_get = tpl_short_iv();
         endcase
     endfunction

@@ -17,7 +17,7 @@
 module poe_thm #(
     parameter int MAX_THREADS = 64,
     parameter int MAX_TS = 16,
-    parameter int MAX_BURST = 4,
+    parameter int MAX_BURST = 8, // 每 ts 最多 burst 数（8）
     parameter int TS_ID_W = 6, // ts 编号位宽（0..63，容纳跳转）
     parameter int CID_W = 17,
     parameter int BUF_DEPTH = 8
@@ -84,14 +84,14 @@ module poe_thm #(
     logic [2:0] th_stream [MAX_THREADS];
     logic [CID_W-1:0] th_cid [MAX_THREADS];
     logic [2:0] th_pos [MAX_THREADS];
-    logic [6:0] th_bs_pc [MAX_THREADS]; // 应执行 burst 全局流水序号（跨 ts，最大 16×4=64）
+    logic [7:0] th_bs_pc [MAX_THREADS]; // 应执行 burst 全局流水序号（跨 ts，最大 16×8=128）
     logic [TS_ID_W-1:0] th_cur_ts [MAX_THREADS]; // 当前 ts 编号（done 统计推进，按 ts_id 跳转）
     logic [3:0] th_ts_idx [MAX_THREADS]; // 当前在第几个 ts（序号 0..n-1）
     logic [TS_ID_W-1:0] th_ts_id_r [MAX_THREADS][MAX_TS]; // 每 ts 编号（递增可跳转）
     logic [7:0] th_wait [MAX_THREADS];
-    logic [2:0] th_done_acc [MAX_THREADS][MAX_TS]; // 每 ts 已完成 burst 数（done 按发射序匹配）
-    logic [2:0] th_need [MAX_THREADS][MAX_TS]; // 每 ts 实际执行 burst 数（branch 提前后）
-    logic [6:0] th_off [MAX_THREADS][MAX_TS+1]; // 每 ts 起始累计偏移（off[k]=前 k 个 ts 的 need 和）
+    logic [3:0] th_done_acc [MAX_THREADS][MAX_TS]; // 每 ts 已完成 burst 数（done 按发射序匹配）
+    logic [3:0] th_need [MAX_THREADS][MAX_TS]; // 每 ts 实际执行 burst 数（branch 提前后，≤8）
+    logic [7:0] th_off [MAX_THREADS][MAX_TS+1]; // 每 ts 起始累计偏移（off[k]=前 k 个 ts 的 need 和）
     logic [3:0] th_sel_ts [MAX_THREADS]; // bs_pc 所属 ts 序号（组合推导）
     logic [2:0] th_sel_idx [MAX_THREADS]; // bs_pc 在所属 ts 内的 burst 序号（组合推导）
     csr_t csr [MAX_THREADS];
@@ -106,7 +106,7 @@ module poe_thm #(
     localparam int ST_W = 3;
     localparam int TS_W = $clog2(MAX_TS + 1); // ts 数位宽（16 → 4bit）
     localparam int TS_ID_VEC_W = MAX_TS * TS_ID_W; // 每 ts 编号向量
-    localparam int BS_W = MAX_TS * 3; // 每 ts burst 数向量（4×3bit）
+    localparam int BS_W = MAX_TS * 4; // 每 ts burst 数向量（16×4bit，0..8）
     localparam int PR_W = 3;
     localparam int BURST_PAT_W = MAX_TS * MAX_BURST * BURST_W; // 4ts×4×32bit
     localparam int DMA_C_W = 8;
@@ -214,7 +214,7 @@ module poe_thm #(
     logic [2:0] done_n; // 本拍 done 事件数（0..6）
     logic [5:0] done_tid_l [6];
     logic [3:0] done_tidx_l [6];
-    logic [1:0] done_cnt_l [6];
+    logic [2:0] done_cnt_l [6]; // 同 (tid,tidx) 同拍合并计数（最多 6）
     always_comb begin
         done_n = 3'd0;
         if (eu_done_vld0) begin
@@ -226,7 +226,7 @@ module poe_thm #(
             else begin
                 done_tid_l[done_n] = eu_done_tid0;
                 done_tidx_l[done_n] = eu_done_tidx0;
-                done_cnt_l[done_n] = 2'd1;
+                done_cnt_l[done_n] = 3'd1;
                 done_n = done_n + 1'b1;
             end
         end
@@ -239,7 +239,7 @@ module poe_thm #(
             else begin
                 done_tid_l[done_n] = eu_done_tid1;
                 done_tidx_l[done_n] = eu_done_tidx1;
-                done_cnt_l[done_n] = 2'd1;
+                done_cnt_l[done_n] = 3'd1;
                 done_n = done_n + 1'b1;
             end
         end
@@ -256,7 +256,7 @@ module poe_thm #(
                     else begin
                         done_tid_l[done_n] = dt;
                         done_tidx_l[done_n] = dti;
-                        done_cnt_l[done_n] = 2'd1;
+                        done_cnt_l[done_n] = 3'd1;
                         done_n = done_n + 1'b1;
                     end
                 end
@@ -267,7 +267,7 @@ module poe_thm #(
     // burst，branch 截断的槽位不计入，映射与 th_burst_r 物理槽位一致）----
     always_comb begin
         for (int i = 0; i < MAX_THREADS; i++) begin
-            th_off[i][0] = 7'd0;
+            th_off[i][0] = 8'd0;
             for (int k = 0; k < MAX_TS; k++)
                 th_off[i][k+1] = th_off[i][k] + th_need[i][k];
         end
@@ -357,7 +357,7 @@ module poe_thm #(
                 automatic logic [2:0] p;
                 automatic thread_tpl_t tpl; // 线程描述：模板池随机
                 automatic logic [TS_W-1:0] ts;
-                automatic logic [MAX_TS*3-1:0] bs; // 每 ts burst 数向量
+                automatic logic [MAX_TS*4-1:0] bs; // 每 ts burst 数向量（0..8）
                 automatic logic [MAX_TS*TS_ID_W-1:0] tid_vec; // 每 ts 编号向量
                 automatic logic [2:0] pr;
                 automatic logic [BURST_PAT_W-1:0] bp;
@@ -398,7 +398,7 @@ module poe_thm #(
                         th_ts_id_r[t][k] <= tid_vec[k*TS_ID_W +: TS_ID_W];
                     // 每 ts 独立：实际条数 = bs[k]（首个 branch 提前结束）
                     for (int k = 0; k < MAX_TS; k++) begin
-                        automatic int need_k = bs[k*3 +: 3];
+                        automatic int need_k = bs[k*4 +: 4];
                         automatic burst_iv_t tmp_b;
                         for (int m = 0; m < MAX_BURST; m++) begin
                             tmp_b = bp[(k*MAX_BURST + m)*BURST_W +: BURST_W];
@@ -407,7 +407,7 @@ module poe_thm #(
                                 break;
                             end
                         end
-                        th_need[t][k] <= need_k[2:0];
+                        th_need[t][k] <= need_k[3:0];
                         for (int m = 0; m < MAX_BURST; m++)
                             th_burst_r[t][k][m] <=
                                 bp[(k*MAX_BURST + m)*BURST_W +: BURST_W];
@@ -498,7 +498,7 @@ module poe_thm #(
                     automatic logic [5:0] dt = done_tid_l[u];
                     if (th_state[dt] != T_IDLE && th_state[dt] != T_DONE) begin
                         // done 由执行单元带回 ts 序号（发射时随 burst 下发），直接累加对应 ts
-                        automatic logic [2:0] sh [MAX_TS];
+                        automatic logic [3:0] sh [MAX_TS];
                         automatic logic [3:0] nts = th_ts_idx[dt];
                         automatic logic [3:0] old_idx = th_ts_idx[dt];
                         automatic logic [TS_ID_W-1:0] ncts = th_cur_ts[dt];

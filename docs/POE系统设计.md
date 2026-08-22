@@ -80,7 +80,7 @@ burst_sch（二级发射：q0→EU0 / q1→EU1 各自按优先级选；4 个 DSE
 
 ### 3.3 线程结构
 
-- 线程 = 若干 ts（1..16，编号可跳转），每个 ts = 若干 burst（1..4）；
+- 线程 = 若干 ts（1..16，编号可跳转），每个 ts = 若干 burst（1..8）；
 - ts0 固定 1 个单 i_task burst；
 - 同一配对（同 tag/同锁）的 c_task loc/free 存在 RBA 读→写的数据先后依赖，
   分处**不同 ts**，顺序由 burst_sch 的 `ts == cur_ts` 检查保证；不同锁/
@@ -248,7 +248,7 @@ c_task 留在缓存下拍重选）；每个 FIFO 每拍出队 1 个（模型化�
 | 项 | 值 |
 | --- | --- |
 | 线程池 / 保序缓存 | 64 / 8 深 |
-| ts / burst 上限 | 16 / 4 |
+| ts / burst 上限 | 16 / 8（每 ts 最多 8 个 burst） |
 | i/v 槽池（q0/q1） | 8 深 ×2（槽项含 pri） |
 | c_task 缓存 | 16 深（解析后的单 task：pri/tid/tidx/ts/dma_id/tag/op） |
 | dma_ctrl c_task FIFO | 4 个（每 DSE 1 个，8 深；满则反压二级发射） |
