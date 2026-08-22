@@ -43,7 +43,7 @@ th_sch（一级发射，全局 (pri,tid) 取前 2；q0/q1 仅存 i/v，c_task �
    ▼
 burst_sch（二级发射：q0→EU0 / q1→EU1 各自按优先级选；4 个 DSE 调度器选 c_task）
    ├─ i/v burst → EU0/EU1（各含 4 个 CU 桩，≤2 task 分发给 2 个）→ eu_done
-   └─ c_task   → DSE 调度器发射即完成 → dma_done（无需执行单元）
+   └─ c_task   → DSE 调度器发射即完成 → dma_done（发射的 c_task 推入 dma_ctrl FIFO）
 ```
 
 完成反馈（eu_done / dma_done）携带 ts 序号回 THM，驱动 `cur_ts` 推进与锁释放。
@@ -198,7 +198,8 @@ th_need[ts] / th_off / th_sel_ts / th_sel_idx`。
 - **c_task**：4 个独立 DSE 调度器（DSE 0..3，DSE==tag），各从 c_task 缓存按
   优先级选 `tag==DSE` 且 `ts == cur_ts` 的最高优先项，每拍最多 4 个
   （每 DSE 1 个）；**发射即完成**——done 由二级发射寄存 1 拍直接返回 THM，
-  无需执行单元；`ts==cur_ts` 保证同配对 loc/free 的先后顺序；
+  发射的 c_task 推入 dma_ctrl 对应 DSE 的 c_task FIFO，**FIFO 满时反压该 DSE
+  发射**（槽保留，下拍重选）；`ts==cur_ts` 保证同配对 loc/free 的先后顺序；
 - 无需资源预检/冲突检查：同地址互斥由 THM 锁在一级发射保证。
 
 ## 8. CU / EU
@@ -208,13 +209,19 @@ th_need[ts] / th_off / th_sel_ts / th_sel_idx`。
   全部完成后聚合回 1 个 `eu_done{vld, tid, ts_idx}`（按 burst 计）；
 - 真实 CU 语义（按 tsk_id 查 vtsk_c、按 sub_pc 取子指令）为后续细化项。
 
-## 9. c_task 执行（二级发射即完成）
+## 9. dma_ctrl（c_task FIFO 存储缓冲）
 
 ### 9.1 定位
 
 解析已在 th_sch 完成（tid/tidx/dma_id/tag/op），c_task 由 4 个 DSE 调度器
 （DSE 0..3，DSE==tag）按优先级选出并发射；**发射即完成**：done 在二级发射
-寄存 1 拍后直接返回 THM，不再有 dma_ctrl 执行单元（无 RBA/SMC/C 窗数据通路）。
+寄存 1 拍后直接返回 THM（无执行延迟/无 RBA/SMC/C 窗数据通路）。
+
+dma_ctrl 保留 **4 个 c_task FIFO**（每 DSE 1 个，默认 8 深，存
+`{tid, tidx, dma_id, tag, op}`），作为二级发射与 dma 侧之间的存储缓冲：
+发射的 c_task 推入对应 FIFO，**FIFO 满时反压二级发射**（该 DSE 本拍不发射，
+c_task 留在缓存下拍重选）；每个 FIFO 每拍出队 1 个（模型化消化，腾出空间）。
+
 同地址互斥由 THM 锁在一级发射保证。
 
 完成反馈：`dma_done{vld, tid, ts_idx}`（4 路，每 DSE 1 路，发射后 1 拍）。
@@ -236,6 +243,7 @@ th_need[ts] / th_off / th_sel_ts / th_sel_idx`。
 | ts / burst 上限 | 16 / 4 |
 | i/v 槽池（q0/q1） | 8 深 ×2（槽项含 pri） |
 | c_task 缓存 | 16 深（解析后的单 task：pri/tid/tidx/ts/dma_id/tag/op） |
+| dma_ctrl c_task FIFO | 4 个（每 DSE 1 个，8 深；满则反压二级发射） |
 | 执行单元 | EU ×2（各 4 个 CU 桩）；c_task 无执行单元（二级发射即 done） |
 | burst 位宽 | 38bit |
 | 锁表 | 16 × 6bit |

@@ -14,7 +14,8 @@ framer/
 
 KOA 8 组 RR+SP 调度 → POE THM（线程管理/保序/CSR/锁）→ th_sch（一级发射：
 q0/q1 仅存 i/v，c_task 解析入独立缓存）→ burst_sch（二级发射：q0→EU0、q1→EU1，
-4 个 DSE 调度器选 c_task，发射即回 done）→ EU×2（各 4 个 CU 桩）。
+4 个 DSE 调度器选 c_task，发射即回 done，推入 dma_ctrl FIFO）→
+EU×2（各 4 个 CU 桩）+ dma_ctrl（4 个 c_task FIFO，满则反压）。
 
 运行：
 

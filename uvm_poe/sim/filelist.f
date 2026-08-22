@@ -7,5 +7,6 @@
 ../rtl/poe_thsch.sv
 ../rtl/poe_burstsch.sv
 ../rtl/poe_eu_stub.sv
+../rtl/poe_dma_ctrl.sv
 ../uvm/ko_pkg.sv
 ../tb/tb_top.sv

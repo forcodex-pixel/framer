@@ -104,10 +104,14 @@ module tb_top;
     logic eu_done_vld0, eu_done_vld1;
     logic [5:0] eu_done_tid0, eu_done_tid1;
     logic [3:0] eu_done_tidx0, eu_done_tidx1;
-    // ---- c_task 发射/done（burst_sch 发射即完成）----
+    // ---- c_task 发射/done（burst_sch 发射即完成；推入 dma_ctrl FIFO）----
     logic [3:0] emit_dma_vld;
     logic [23:0] emit_dma_tid;
     logic [15:0] emit_dma_tidx;
+    logic [11:0] emit_dma_dma_id;
+    logic [7:0] emit_dma_tag;
+    logic [3:0] emit_dma_op;
+    logic [3:0] dma_full;
     logic [3:0] dma_done_vld;
     logic [23:0] dma_done_tid;
     logic [15:0] dma_done_tidx;
@@ -183,7 +187,9 @@ module tb_top;
     .emit_eu_tidx1(emit_eu_tidx1), .emit_eu_burst1(emit_eu_burst1),
     .eu1_ack(eu1_ack),
     .emit_dma_vld(emit_dma_vld), .emit_dma_tid(emit_dma_tid),
-    .emit_dma_tidx(emit_dma_tidx),
+    .emit_dma_tidx(emit_dma_tidx), .emit_dma_dma_id(emit_dma_dma_id),
+    .emit_dma_tag(emit_dma_tag), .emit_dma_op(emit_dma_op),
+    .dma_full(dma_full),
     .dma_done_vld(dma_done_vld), .dma_done_tid(dma_done_tid),
     .dma_done_tidx(dma_done_tidx),
     .pre_vld(pre_vld), .pre_tid(pre_tid),
@@ -205,6 +211,17 @@ module tb_top;
     .emit_eu_tidx(emit_eu_tidx1), .emit_eu_burst(emit_eu_burst1),
     .eu_ack(eu1_ack),
     .eu_done_vld(eu_done_vld1), .eu_done_tid(eu_done_tid1), .eu_done_tidx(eu_done_tidx1)
+    );
+
+    poe_dma_ctrl u_dma (
+    .clk(clk), .rst_n(rst_n),
+    .push_vld(emit_dma_vld),
+    .push_tid(emit_dma_tid),
+    .push_tidx(emit_dma_tidx),
+    .push_dma_id(emit_dma_dma_id),
+    .push_tag(emit_dma_tag),
+    .push_op(emit_dma_op),
+    .fifo_full(dma_full)
     );
 
     // O 窗反压占位：固定 0（O 窗池设计后续补充）
@@ -249,8 +266,9 @@ module tb_top;
         end
         for (int d = 0; d < 4; d++)
             if (emit_dma_vld[d])
-                $fdisplay(thm_logf, "EMIT_DMA t=%0t dse=%0d tid=%0d tidx=%0d",
-                $time, d, emit_dma_tid[d*6 +: 6], emit_dma_tidx[d*4 +: 4]);
+                $fdisplay(thm_logf, "EMIT_DMA t=%0t dse=%0d tid=%0d tidx=%0d dma_id=%0d tag=%0d op=%0d",
+                $time, d, emit_dma_tid[d*6 +: 6], emit_dma_tidx[d*4 +: 4],
+                emit_dma_dma_id[d*3 +: 3], emit_dma_tag[d*2 +: 2], emit_dma_op[d]);
         if (iss_vld0)
             $fdisplay(thm_logf, "ISS0 t=%0t tid=%0d curts=%0d burst_ts=%0d pc=%0d need=%0d tscnt=%0d st=%0d",
         $time, iss_tid0, ready_curts[iss_tid0*6 +: 6],
