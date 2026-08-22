@@ -4,7 +4,8 @@
 //   ① ts == 线程当前 cur_ts（pre 槽跳过）
 //   ② 不满足"O 窗反压 且 burst 涉及 O 窗操作"
 // - c_task：4 个独立 DSE 调度器（DSE 0..3，DSE==tag），各自从 c_task 缓存按优先级
-//   选 tag 匹配的最高优先项，每拍最多 4 个（每 DSE 1 个），发射给对应 dma_ctrl；
+//   选 tag 匹配的最高优先项，每拍最多 4 个（每 DSE 1 个），**发射即完成**：
+//   done 由二级发射直接返回 THM（寄存 1 拍），无需执行单元/dma_ctrl；
 //   c_task 仍须满足 ts == 线程当前 cur_ts（依赖 burst 分处不同 ts，保证 loc/free
 //   等先后顺序）；"无先后关系"指槽池无 FIFO/头阻，按优先级选任意槽
 // - pre_read 预读：8 深缓存暂存（占位，接收即吸收，预读语义待细化）
@@ -57,14 +58,14 @@ module poe_burstsch #(
     output logic [3:0] emit_eu_tidx1,
     output logic [BURST_W-1:0] emit_eu_burst1,
     input logic eu1_ack,
-    // ---- c_task 发射（→ 4 个 dma_ctrl，每 DSE 1 个） ----
+    // ---- c_task 发射（每 DSE 1 个，发射即完成：done 由二级发射直接返回） ----
     output logic [3:0] emit_dma_vld,
     output logic [23:0] emit_dma_tid,
     output logic [15:0] emit_dma_tidx,
-    output logic [11:0] emit_dma_dma_id,
-    output logic [7:0] emit_dma_tag,
-    output logic [3:0] emit_dma_op,
-    input logic [3:0] dma_ack,
+    // ---- c_task done（发射后 1 拍返回 THM，无需执行单元） ----
+    output logic [3:0] dma_done_vld,
+    output logic [23:0] dma_done_tid,
+    output logic [15:0] dma_done_tidx,
     // ---- pre_read 预读接口（THM → 缓存；占位吸收） ----
     input logic [3:0] pre_vld,
     input logic [23:0] pre_tid,
@@ -205,23 +206,39 @@ module poe_burstsch #(
         end
     end
 
-    // 发射使能：目的 dma 单元可收
+    // 发射使能：DSE 调度器选中即可发射（发射即完成，无执行单元/反压）
     logic [3:0] emit_dma;
     always_comb begin
         for (int d = 0; d < 4; d++) begin
-            emit_dma[d] = ct_pick_vld[d] && dma_ack[d];
+            emit_dma[d] = ct_pick_vld[d];
             emit_dma_vld[d] = emit_dma[d];
             emit_dma_tid[d*6 +: 6] = emit_dma[d] ? ct_tid[ct_pick[d]*6 +: 6] : 6'd0;
             emit_dma_tidx[d*4 +: 4] = emit_dma[d] ? ct_tidx[ct_pick[d]*4 +: 4] : 4'd0;
-            emit_dma_dma_id[d*3 +: 3] = emit_dma[d] ? ct_dma[ct_pick[d]*3 +: 3] : 3'd0;
-            emit_dma_tag[d*2 +: 2] = emit_dma[d] ? ct_tag[ct_pick[d]*2 +: 2] : 2'd0;
-            emit_dma_op[d] = emit_dma[d] ? ct_op[ct_pick[d]] : 1'b0;
         end
         // 逐槽 ack（tag 唯一，最多一个 DSE 命中）
         for (int i = 0; i < CT_DEPTH; i++) begin
             ct_ack[i] = 1'b0;
             for (int d = 0; d < 4; d++)
                 if (emit_dma[d] && (ct_pick[d] == i)) ct_ack[i] = 1'b1;
+        end
+    end
+
+    // ---- c_task done：发射寄存 1 拍后返回（发射即完成） ----
+    logic [3:0] dma_done_vld_r;
+    logic [23:0] dma_done_tid_r;
+    logic [15:0] dma_done_tidx_r;
+    assign dma_done_vld = dma_done_vld_r;
+    assign dma_done_tid = dma_done_tid_r;
+    assign dma_done_tidx = dma_done_tidx_r;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            dma_done_vld_r <= '0;
+            dma_done_tid_r <= '0;
+            dma_done_tidx_r <= '0;
+        end else begin
+            dma_done_vld_r <= emit_dma;
+            dma_done_tid_r <= emit_dma_tid;
+            dma_done_tidx_r <= emit_dma_tidx;
         end
     end
 endmodule

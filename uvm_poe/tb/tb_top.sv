@@ -104,13 +104,10 @@ module tb_top;
     logic eu_done_vld0, eu_done_vld1;
     logic [5:0] eu_done_tid0, eu_done_tid1;
     logic [3:0] eu_done_tidx0, eu_done_tidx1;
-    // ---- dma_ctrl（4 个 DSE 单元）----
-    logic [3:0] emit_dma_vld, dma_ack;
+    // ---- c_task 发射/done（burst_sch 发射即完成）----
+    logic [3:0] emit_dma_vld;
     logic [23:0] emit_dma_tid;
     logic [15:0] emit_dma_tidx;
-    logic [11:0] emit_dma_dma_id;
-    logic [7:0] emit_dma_tag;
-    logic [3:0] emit_dma_op;
     logic [3:0] dma_done_vld;
     logic [23:0] dma_done_tid;
     logic [15:0] dma_done_tidx;
@@ -186,9 +183,9 @@ module tb_top;
     .emit_eu_tidx1(emit_eu_tidx1), .emit_eu_burst1(emit_eu_burst1),
     .eu1_ack(eu1_ack),
     .emit_dma_vld(emit_dma_vld), .emit_dma_tid(emit_dma_tid),
-    .emit_dma_tidx(emit_dma_tidx), .emit_dma_dma_id(emit_dma_dma_id),
-    .emit_dma_tag(emit_dma_tag), .emit_dma_op(emit_dma_op),
-    .dma_ack(dma_ack),
+    .emit_dma_tidx(emit_dma_tidx),
+    .dma_done_vld(dma_done_vld), .dma_done_tid(dma_done_tid),
+    .dma_done_tidx(dma_done_tidx),
     .pre_vld(pre_vld), .pre_tid(pre_tid),
     .pre_dma_addr(pre_dma_addr), .pre_op(pre_op),
     .pre_buf_rdy(pre_buf_rdy)
@@ -208,46 +205,6 @@ module tb_top;
     .emit_eu_tidx(emit_eu_tidx1), .emit_eu_burst(emit_eu_burst1),
     .eu_ack(eu1_ack),
     .eu_done_vld(eu_done_vld1), .eu_done_tid(eu_done_tid1), .eu_done_tidx(eu_done_tidx1)
-    );
-
-    poe_dma_ctrl u_dma0 (
-    .clk(clk), .rst_n(rst_n),
-    .emit_dma_vld(emit_dma_vld[0]), .emit_dma_tid(emit_dma_tid[5:0]),
-    .emit_dma_tidx(emit_dma_tidx[3:0]), .emit_dma_dma_id(emit_dma_dma_id[2:0]),
-    .emit_dma_tag(emit_dma_tag[1:0]), .emit_dma_op(emit_dma_op[0]),
-    .dma_ack(dma_ack[0]),
-    .dma_done_vld(dma_done_vld[0]), .dma_done_tid(dma_done_tid[5:0]),
-    .dma_done_tidx(dma_done_tidx[3:0])
-    );
-
-    poe_dma_ctrl u_dma1 (
-    .clk(clk), .rst_n(rst_n),
-    .emit_dma_vld(emit_dma_vld[1]), .emit_dma_tid(emit_dma_tid[11:6]),
-    .emit_dma_tidx(emit_dma_tidx[7:4]), .emit_dma_dma_id(emit_dma_dma_id[5:3]),
-    .emit_dma_tag(emit_dma_tag[3:2]), .emit_dma_op(emit_dma_op[1]),
-    .dma_ack(dma_ack[1]),
-    .dma_done_vld(dma_done_vld[1]), .dma_done_tid(dma_done_tid[11:6]),
-    .dma_done_tidx(dma_done_tidx[7:4])
-    );
-
-    poe_dma_ctrl u_dma2 (
-    .clk(clk), .rst_n(rst_n),
-    .emit_dma_vld(emit_dma_vld[2]), .emit_dma_tid(emit_dma_tid[17:12]),
-    .emit_dma_tidx(emit_dma_tidx[11:8]), .emit_dma_dma_id(emit_dma_dma_id[8:6]),
-    .emit_dma_tag(emit_dma_tag[5:4]), .emit_dma_op(emit_dma_op[2]),
-    .dma_ack(dma_ack[2]),
-    .dma_done_vld(dma_done_vld[2]), .dma_done_tid(dma_done_tid[17:12]),
-    .dma_done_tidx(dma_done_tidx[11:8])
-    );
-
-    poe_dma_ctrl u_dma3 (
-    .clk(clk), .rst_n(rst_n),
-    .emit_dma_vld(emit_dma_vld[3]), .emit_dma_tid(emit_dma_tid[23:18]),
-    .emit_dma_tidx(emit_dma_tidx[15:12]), .emit_dma_dma_id(emit_dma_dma_id[11:9]),
-    .emit_dma_tag(emit_dma_tag[7:6]), .emit_dma_op(emit_dma_op[3]),
-    .dma_ack(dma_ack[3]),
-    .dma_done_vld(dma_done_vld[3]), .dma_done_tid(dma_done_tid[23:18]),
-    .dma_done_tidx(dma_done_tidx[15:12])
     );
 
     // O 窗反压占位：固定 0（O 窗池设计后续补充）
@@ -292,9 +249,8 @@ module tb_top;
         end
         for (int d = 0; d < 4; d++)
             if (emit_dma_vld[d])
-                $fdisplay(thm_logf, "EMIT_DMA t=%0t dse=%0d tid=%0d tidx=%0d dma_id=%0d tag=%0d op=%0d",
-                $time, d, emit_dma_tid[d*6 +: 6], emit_dma_tidx[d*4 +: 4],
-                emit_dma_dma_id[d*3 +: 3], emit_dma_tag[d*2 +: 2], emit_dma_op[d]);
+                $fdisplay(thm_logf, "EMIT_DMA t=%0t dse=%0d tid=%0d tidx=%0d",
+                $time, d, emit_dma_tid[d*6 +: 6], emit_dma_tidx[d*4 +: 4]);
         if (iss_vld0)
             $fdisplay(thm_logf, "ISS0 t=%0t tid=%0d curts=%0d burst_ts=%0d pc=%0d need=%0d tscnt=%0d st=%0d",
         $time, iss_tid0, ready_curts[iss_tid0*6 +: 6],
@@ -390,8 +346,8 @@ module tb_top;
             else n_done++;
         end
         // 校验：所有线程应回到 IDLE（C 窗为纯数据存储，无 loc/free 占用状态）
-        $fdisplay(thm_logf, "FINAL idle=%0d ready=%0d issued=%0d done=%0d dma_st=%0d",
-                  idle, n_ready, n_issued, n_done, u_dma0.st);
+        $fdisplay(thm_logf, "FINAL idle=%0d ready=%0d issued=%0d done=%0d",
+                  idle, n_ready, n_issued, n_done);
         for (i = 0; i < 64; i++)
             if (u_thm.th_state[i] != 2'd0)
                 $fdisplay(thm_logf, "NONIDLE tid=%0d st=%0d curts=%0d pc=%0d",

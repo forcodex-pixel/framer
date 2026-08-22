@@ -43,7 +43,7 @@ th_sch（一级发射，全局 (pri,tid) 取前 2；q0/q1 仅存 i/v，c_task �
    ▼
 burst_sch（二级发射：q0→EU0 / q1→EU1 各自按优先级选；4 个 DSE 调度器选 c_task）
    ├─ i/v burst → EU0/EU1（各含 4 个 CU 桩，≤2 task 分发给 2 个）→ eu_done
-   └─ c_task   → dma_ctrl ×4（每 DSE 1 个，loc=RBA读 / free=RBA写）→ dma_done
+   └─ c_task   → DSE 调度器发射即完成 → dma_done（无需执行单元）
 ```
 
 完成反馈（eu_done / dma_done）携带 ts 序号回 THM，驱动 `cur_ts` 推进与锁释放。
@@ -197,7 +197,8 @@ th_need[ts] / th_off / th_sel_ts / th_sel_idx`。
   可发射条件：`ts == 线程当前 cur_ts`（pre 槽跳过）、非 O 窗反压；
 - **c_task**：4 个独立 DSE 调度器（DSE 0..3，DSE==tag），各从 c_task 缓存按
   优先级选 `tag==DSE` 且 `ts == cur_ts` 的最高优先项，每拍最多 4 个
-  （每 DSE 1 个）；`ts==cur_ts` 保证同配对 loc/free 的先后顺序；
+  （每 DSE 1 个）；**发射即完成**——done 由二级发射寄存 1 拍直接返回 THM，
+  无需执行单元；`ts==cur_ts` 保证同配对 loc/free 的先后顺序；
 - 无需资源预检/冲突检查：同地址互斥由 THM 锁在一级发射保证。
 
 ## 8. CU / EU
@@ -207,33 +208,16 @@ th_need[ts] / th_off / th_sel_ts / th_sel_idx`。
   全部完成后聚合回 1 个 `eu_done{vld, tid, ts_idx}`（按 burst 计）；
 - 真实 CU 语义（按 tsk_id 查 vtsk_c、按 sub_pc 取子指令）为后续细化项。
 
-## 9. dma_ctrl（c_task / C 窗）
+## 9. c_task 执行（二级发射即完成）
 
 ### 9.1 定位
 
-4 个独立单元（每 DSE 1 个），各执行单 c_task（loc= RBA 读 / free= RBA 写），
-C 窗为每线程独享的纯数据存储（只存 c_line）。解析已在 th_sch 完成
-（tid/tidx/dma_id/tag/op），本单元只执行；同地址互斥由 THM 锁在一级发射
-保证，不再做任何 tag 相同/冲突检查，也不回写 CSR.cw。
+解析已在 th_sch 完成（tid/tidx/dma_id/tag/op），c_task 由 4 个 DSE 调度器
+（DSE 0..3，DSE==tag）按优先级选出并发射；**发射即完成**：done 在二级发射
+寄存 1 拍后直接返回 THM，不再有 dma_ctrl 执行单元（无 RBA/SMC/C 窗数据通路）。
+同地址互斥由 THM 锁在一级发射保证。
 
-### 9.2 loc（0）
-
-- RBA 读 SMC[tag] → 回填 `c_wnd[tid][dma_id].c_line`（2 拍延迟）；
-- 不做任何 C 窗占用/生命周期管理，不回写 cw。
-
-### 9.3 free（1）
-
-- RBA 把 C 窗 c_line 写回 SMC[tag]；
-- 直接读写本线程固定位置 `c_wnd[tid][dma_id]`（无 tag 匹配、无释放状态、不回写 cw）。
-
-### 9.4 状态机
-
-```text
-IDLE（单 c_task）
-  loc  → RBA_RD → RBA_RD_DONE(回填 c_line) → DONE
-  free → FREE_RBA(写SMC) → DONE
-→ DONE（回 dma_done{tid, ts_idx}）→ IDLE
-```
+完成反馈：`dma_done{vld, tid, ts_idx}`（4 路，每 DSE 1 路，发射后 1 拍）。
 
 ## 10. UVM 平台
 
@@ -252,7 +236,7 @@ IDLE（单 c_task）
 | ts / burst 上限 | 16 / 4 |
 | i/v 槽池（q0/q1） | 8 深 ×2（槽项含 pri） |
 | c_task 缓存 | 16 深（解析后的单 task：pri/tid/tidx/ts/dma_id/tag/op） |
-| 执行单元 | EU ×2（各 4 个 CU 桩）+ dma_ctrl ×4（每 DSE 1 个） |
+| 执行单元 | EU ×2（各 4 个 CU 桩）；c_task 无执行单元（二级发射即 done） |
 | burst 位宽 | 38bit |
 | 锁表 | 16 × 6bit |
 | C 窗 | 每线程独享 8 位置（64×8，纯数据存储，无 loc/free 生命周期） |
