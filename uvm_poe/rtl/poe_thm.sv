@@ -11,7 +11,8 @@
 //   同步；dma_c/cw 暴露给 dma_ctrl / burst_sch（c_task 按 dma_id 查询）
 // - pre_read 插队：KO 带 pre_read 时直接注入一条 c_task burst（不建线程/不查保序），
 //   靠 burst 队列项 pre 标志区分（th_id 无保留值）；预读接口 pre_mes 4 组，模型占位单路
-// - C 窗资源生命周期完全由 c_task（loc/free 成对）控制，线程结束不通知 dma_ctrl 归还
+// - C 窗每线程独享、无 loc/free 生命周期：dma_ctrl 只读 cw 执行 RBA 读/写，
+//   不回写 CSR.cw；锁（ts 级）仅用于一级发射互斥，状态只在此维护
 // ============================================================================
 module poe_thm #(
     parameter int MAX_THREADS = 64,
@@ -65,11 +66,6 @@ module poe_thm #(
     // ---- CSR 暴露（c_task 按 dma_id 查询）：dma_c → burst_sch/dma_ctrl；cw → dma_ctrl ----
     output logic [MAX_THREADS*8-1:0] csr_dma_c,
     output logic [MAX_THREADS*384-1:0] csr_cw,
-    // ---- CSR.cw 条目更新（dma_ctrl loc/free 回写） ----
-    input logic cw_upd_vld,
-    input logic [5:0] cw_upd_tid,
-    input logic [2:0] cw_upd_ind,
-    input logic [47:0] cw_upd_data,
     output logic [7:0] pre_dma_c,
     output logic [255:0] pre_cw
     );
@@ -547,9 +543,6 @@ module poe_thm #(
                     if (lock_owner[k] == i[5:0])
                         lock_owner[k] <= LOCK_FREE;
             end
-            // ---- dma_ctrl 回写 CSR.cw 条目（loc 申请/free 释放/转交） ----
-            if (cw_upd_vld)
-                csr[cw_upd_tid].cw[cw_upd_ind*48 +: 48] <= cw_upd_data;
             sys_ts_cnt <= sys_ts_cnt + 1'b1;
         end
     end

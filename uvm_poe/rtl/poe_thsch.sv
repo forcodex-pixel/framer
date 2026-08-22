@@ -1,6 +1,8 @@
 // POE th_sch（一级发射调度器）行为模型：
 // - 每拍从 READY 线程按 (pri, tid) 排序固定发射 ≤2 个：先按优先级（值小优先），
 //   同优先级按 tid 小者优先；**全局取前 2 名**（无奇偶分组）
+// - 同拍互斥：两 winner 若同为 ts 首个 loc burst（st=1 && lock_req）且 lock_id 相同，
+//   只发高优先者，次者保持 READY 下拍重选（锁仅作用于一级发射阻塞）
 // - 路由：winner0 → q0、winner1 → q1（各受队列满反压），不做线程固定 lane；
 //   线程内 burst 顺序由 ts 机制保证：同一配对（同 tag/同锁）的 loc/free 有先后
 //   依赖，分处不同 ts，burst_sch 按 `ts == cur_ts` 发射，free 必然在 loc 完成后
@@ -61,21 +63,32 @@ module poe_thsch #(
     logic iss0, iss1;
     int tid0, tid1;
     logic [2:0] pri0, pri1;
-    // 全局取 (pri, tid) 最小的两个 READY 线程（无奇偶分组）
+    // 全局取 (pri, tid) 最小的两个 READY 线程（无奇偶分组）；
+    // 第二名胜出者排除与第一名同锁 id 的 loc burst（st=1 && lock_req）
     always_comb begin
+        automatic burst_iv_t rb0;
+        automatic logic lock0_eff;
         iss0 = 1'b0; tid0 = 0;
         iss1 = 1'b0; tid1 = 0;
         pri0 = 3'd7; pri1 = 3'd7;
+        // 第一遍：全局第一名
         for (int s = 0; s < MAX_THREADS; s++)
             if (ready_mask[s]) begin
                 automatic logic [2:0] p = ready_pri[s*3 +: 3];
-                if (p < pri0 || (p == pri0 && s < tid0) || !iss0) begin
-                    // 原第一名降为第二名
-                    iss1 = iss0; tid1 = tid0; pri1 = pri0;
+                if (p < pri0 || (p == pri0 && s < tid0) || !iss0)
                     iss0 = 1'b1; tid0 = s; pri0 = p;
-                end else if (p < pri1 || (p == pri1 && s < tid1) || !iss1) begin
+            end
+        rb0 = ready_burst[tid0*BURST_W +: BURST_W];
+        lock0_eff = iss0 && rb0.st && rb0.lock_req;
+        // 第二遍：全局第二名（排除 tid0 与同锁 id 冲突线程）
+        for (int s = 0; s < MAX_THREADS; s++)
+            if (ready_mask[s] && s != tid0) begin
+                automatic logic [2:0] p = ready_pri[s*3 +: 3];
+                automatic burst_iv_t rb = ready_burst[s*BURST_W +: BURST_W];
+                if (lock0_eff && rb.st && rb.lock_req && rb.lock_id == rb0.lock_id)
+                    continue; // 同拍不能同时发射同锁 id 的 loc burst
+                if (p < pri1 || (p == pri1 && s < tid1) || !iss1)
                     iss1 = 1'b1; tid1 = s; pri1 = p;
-                end
             end
     end
 

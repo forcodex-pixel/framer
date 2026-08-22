@@ -1,22 +1,17 @@
 // ============================================================================
-// POE dma_ctrl 行为模型：c_task（loc/free）+ C 窗资源管理 + SMC/RBA 模型
+// POE dma_ctrl 行为模型：c_task（loc= RBA 读 / free= RBA 写）+ SMC/RBA 模型
 // 结构（对应《POE系统设计.md》）：
 // - 接收 burst_sch 二级发射的 c_task burst（每拍 ≤1，含 ≤2 个 c_task）；
 //   按 c0/c1 + CSR.dma_c 判有效任务，按 dma_id 查 CSR.cw 得 op_type（loc/free）
-//   与 smc 地址（tag）；同拍两个 free 同地址只执行端口小者。
-// - C 窗：每线程独享 8 个固定位置（全局号 = tid×8 + dma_id，9bit，dma_id 0..7 全部映射），
-//   无共享资源池 / FIFO / 占用计数。
-// - THM 线程级互斥锁（16 个独立锁）保证同一 smc 地址同一时刻只有一个线程执行，
-//   因此**不再需要 C 窗扫描查重/指令预存/转交**：loc 直接申请、free 直接释放。
-// - loc（0）：写固定位置（tid×8 + dma_id）的 C 窗条目
-//   （tag/c_line/d/o/r/cnt/ind）、更新 CSR.cw（o=1、c_line_num、start_ts、occ_ts）、
-//   经 RBA 读 SMC 数据回填 c_line 并置 r=1。
-// - free（1）：RBA 把 C 窗 c_line 写回 SMC[tag] → C 窗条目 o=0、cw.o=0。
-//   释放目标由 (cur_tid, tag 匹配出的 loc 条目索引) 直接计算全局位置，
-//   不依赖 cw.c_line_num（该字段仅存线程内索引，避免 tid≥32 时 8bit 回绕）。
-// - 资源生命周期完全由 c_task 控制（lock/free 成对出现），线程结束不兜底归还；
-//   dma_done 仅表示 burst 执行完成（THM cur_ts 推进用），不归还资源。
-// - pre 插队 burst：不占资源、不执行、不回 done（占位，预读语义待细化）。
+//   与 smc 地址（tag）；**不再做任何 tag 相同/冲突检查**（同地址互斥由 THM
+//   锁在一级发射阻塞，同地址操作在线程描述中约束为携带相同锁 id）。
+// - C 窗每线程独享 8 个固定位置（cw 8 项全映射），**无 loc/free 生命周期**：
+//   c_wnd 仅作纯数据存储（c_line），不维护 o/d/r/cnt/ind 占用状态；
+//   CSR.cw 字段（r/o/c_line_num/start_ts/occ_ts/rsv）保留定义，dma_ctrl 不回写。
+// - loc（0）：RBA 读 SMC[tag] → 回填 c_wnd[tid][dma_id].c_line（2 拍延迟）；
+// - free（1）：RBA 写 c_wnd[tid][dma_id].c_line → SMC[tag]（1 拍延迟）；
+// - dma_done 表示 burst 执行完成（THM cur_ts 推进用）。
+// - pre 插队 burst：不执行、不回 done（占位，预读语义待细化）。
 // ============================================================================
 module poe_dma_ctrl #(
     parameter int MAX_THREADS = 64,
@@ -32,15 +27,9 @@ module poe_dma_ctrl #(
     input logic [BURST_W-1:0] emit_dma_burst,
     input logic emit_dma_pre,
     output logic dma_ack,
-    // ---- CSR / 线程状态（THM） ----
+    // ---- CSR（THM，只读：dma_c 任务掩码 / cw 操作表） ----
     input logic [MAX_THREADS*8-1:0] csr_dma_c,
     input logic [MAX_THREADS*384-1:0] csr_cw,
-    input logic [MAX_THREADS*TS_ID_W-1:0] thread_curts,
-    // ---- CSR.cw 条目更新（→ THM） ----
-    output logic cw_upd_vld,
-    output logic [5:0] cw_upd_tid,
-    output logic [2:0] cw_upd_ind,
-    output logic [47:0] cw_upd_data,
     // ---- 完成（THM cur_ts 推进） ----
     output logic dma_done_vld,
     output logic [5:0] dma_done_tid,
@@ -57,13 +46,12 @@ module poe_dma_ctrl #(
 
     typedef enum logic [3:0] {
         S_IDLE, S_LOAD,
-        S_MISS,
         S_RBA_RD, S_RBA_RD_DONE,
-        S_FREE_RBA, S_FREE_REL,
+        S_FREE_RBA,
         S_NEXT, S_DONE
     } state_t;
 
-    // ---- C 窗：每线程独享 8 个固定位置（cw 8 项全映射，无共享/FIFO） ----
+    // ---- C 窗：每线程独享 8 个固定位置（纯数据存储，无占用管理） ----
     localparam int C_WND_PER_TH = 8; // 每线程独享位置数（= cw 项数）
     c_wnd_entry_t c_wnd [MAX_THREADS][C_WND_PER_TH];
     // ---- SMC 模型（tag 低 8bit 索引，128bit 行） ----
@@ -76,33 +64,18 @@ module poe_dma_ctrl #(
     logic [2:0] cur_dma_id;
     logic [19:0] cur_tag;
     logic cur_op; // 0=loc 1=free
-    logic cur_o; // 当前任务 cw 的 o（该线程是否已占据资源）
-    logic [2:0] cur_tgt_ind; // free 释放目标 cw 条目索引（按 tag 匹配）
-    logic [7:0] cur_occ;
-    logic [8:0] cur_cn; // 当前 C 窗全局位置（tid×8 + dma_id，9bit）
     // task 解析结果（S_LOAD 锁存）
     logic t0_ok, t1_ok;
     logic [2:0] t1_dma_id;
     logic [19:0] t1_tag;
     logic t1_op;
-    logic [7:0] t1_occ;
-    logic [8:0] t1_cn;
     logic task_is0; // 当前处理 task0（否则 task1）
     logic [127:0] rba_rd_data;
-    // cw 更新请求（寄存，下一拍 THM 采样）
-    logic cw_upd_vld_r;
-    logic [5:0] cw_upd_tid_r;
-    logic [2:0] cw_upd_ind_r;
-    logic [47:0] cw_upd_data_r;
     // dma_done（寄存，S_DONE 拍置位）
     logic dma_done_vld_r;
     logic [5:0] dma_done_tid_r;
     logic [3:0] dma_done_tidx_r;
     assign dma_ack = (st == S_IDLE);
-    assign cw_upd_vld = cw_upd_vld_r;
-    assign cw_upd_tid = cw_upd_tid_r;
-    assign cw_upd_ind = cw_upd_ind_r;
-    assign cw_upd_data = cw_upd_data_r;
     assign dma_done_vld = dma_done_vld_r;
     assign dma_done_tid = dma_done_tid_r;
     assign dma_done_tidx = dma_done_tidx_r;
@@ -125,28 +98,17 @@ module poe_dma_ctrl #(
             cur_dma_id <= '0;
             cur_tag <= '0;
             cur_op <= 1'b0;
-            cur_o <= 1'b0;
-            cur_tgt_ind <= '0;
-            cur_occ <= '0;
-            cur_cn <= '0;
             t0_ok <= 1'b0;
             t1_ok <= 1'b0;
             t1_dma_id <= '0;
             t1_tag <= '0;
             t1_op <= 1'b0;
-            t1_occ <= '0;
-            t1_cn <= '0;
             task_is0 <= 1'b1;
             rba_rd_data <= '0;
-            cw_upd_vld_r <= 1'b0;
-            cw_upd_tid_r <= '0;
-            cw_upd_ind_r <= '0;
-            cw_upd_data_r <= '0;
             dma_done_vld_r <= 1'b0;
             dma_done_tid_r <= '0;
             dma_done_tidx_r <= '0;
         end else begin
-            cw_upd_vld_r <= 1'b0; // 单拍请求，默认清
             dma_done_vld_r <= 1'b0;
             case (st)
                 S_IDLE: begin
@@ -168,131 +130,39 @@ module poe_dma_ctrl #(
                     e1 = cw_entry_of(cur_tid, b.dma_id1);
                     t0c = b.c0 && dc[b.dma_id0];
                     t1c = b.vld_cu && b.c1 && dc[b.dma_id1];
-                    // 同拍 free 去重：task0/task1 均 free 且 tag 相同 → 只执行 task0
-                    if (t0c && t1c && e0[27] && e1[27] && (e0[47:28] == e1[47:28]))
-                        t1c = 1'b0;
                     t0_ok <= t0c;
                     t1_ok <= t1c;
                     t1_dma_id <= b.dma_id1;
                     t1_tag <= e1[47:28];
                     t1_op <= e1[27];
-                    t1_occ <= b.occ_ts1;
-                    t1_cn <= 9'd0; // 实际值在 t1c 分支按 tag 查找后锁存
                     task_is0 <= 1'b1;
                     if (t0c) begin
-                        automatic int tgt = b.dma_id0;
-                        automatic logic [47:0] te = e0;
-                        if (e0[27]) begin // free：释放目标按 tag 在 cw 中匹配（loc 条目）
-                            // 互斥锁保证同地址无并发，同线程内同 tag 只有一个 loc 条目，
-                            // 直接找 tag 匹配条目（锁保证 loc 已先执行，o=1）
-                            tgt = -1;
-                            for (int k = 0; k < 8; k++)
-                                if (cw_entry_of(cur_tid, k[2:0])[47:28] == e0[47:28]) begin
-                                    tgt = k;
-                                    break;
-                                end
-                            te = cw_entry_of(cur_tid, tgt[2:0]);
-                        end
                         cur_dma_id <= b.dma_id0;
                         cur_tag <= e0[47:28];
                         cur_op <= e0[27];
-                        cur_tgt_ind <= tgt[2:0];
-                        cur_o <= te[25];
-                        cur_occ <= b.occ_ts0;
-                        cur_cn <= cur_tid*8 + tgt[2:0]; // 全局位置 = tid×8 + loc 条目索引
-                        st <= e0[27] ? S_FREE_RBA : S_MISS;
+                        st <= e0[27] ? S_FREE_RBA : S_RBA_RD;
                     end else if (t1c) begin
-                        automatic int tgt = b.dma_id1;
-                        automatic logic [47:0] te = e1;
-                        if (e1[27]) begin
-                            tgt = -1;
-                            for (int k = 0; k < 8; k++)
-                                if (cw_entry_of(cur_tid, k[2:0])[47:28] == e1[47:28]) begin
-                                    tgt = k;
-                                    break;
-                                end
-                            te = cw_entry_of(cur_tid, tgt[2:0]);
-                        end
                         cur_dma_id <= b.dma_id1;
                         cur_tag <= e1[47:28];
                         cur_op <= e1[27];
-                        cur_tgt_ind <= tgt[2:0];
-                        cur_o <= te[25];
-                        cur_occ <= b.occ_ts1;
-                        cur_cn <= cur_tid*8 + tgt[2:0]; // 全局位置 = tid×8 + loc 条目索引
-                        t1_cn <= cur_tid*8 + tgt[2:0];
-                        st <= e1[27] ? S_FREE_RBA : S_MISS;
+                        st <= e1[27] ? S_FREE_RBA : S_RBA_RD;
                     end else begin
                         st <= S_DONE; // 无有效任务也回 done（THM cur_ts 依赖）
                     end
-                end
-                S_MISS: begin
-                    // loc：写固定位置（tid×8 + dma_id）的 C 窗 + 更新 cw；RBA 读下一拍发起
-                    // （互斥锁保证无冲突，直接申请，不做查重/预存/转交）
-                    automatic c_wnd_entry_t we;
-                    automatic cw_entry_t ce;
-                    automatic logic [8:0] cn;
-                    cn = cur_tid*8 + cur_dma_id;
-                    cur_cn <= cn;
-                    we.tag = cur_tag;
-                    we.c_line = '0;
-                    we.d = 1'b0;
-                    we.o = 1'b1;
-                    we.r = 1'b0;
-                    we.cnt = 9'd0;
-                    we.ind = cur_dma_id; // 线程内位置索引（全局位置 = tid×8 + ind）
-                    c_wnd[cur_tid][cur_dma_id] <= we;
-                    ce.tag = cur_tag;
-                    ce.op_type = cur_op;
-                    ce.r = 1'b0;
-                    ce.o = 1'b1;
-                    ce.c_line_num = cur_dma_id; // 线程内位置索引（全局位置 = tid×8 + c_line_num）
-                    ce.start_ts = thread_curts[cur_tid*TS_ID_W +: TS_ID_W];
-                    ce.occ_ts = cur_occ;
-                    ce.rsv = 1'b0;
-                    cw_upd_vld_r <= 1'b1;
-                    cw_upd_tid_r <= cur_tid;
-                    cw_upd_ind_r <= cur_dma_id;
-                    cw_upd_data_r <= ce;
-                    st <= S_RBA_RD;
                 end
                 S_RBA_RD: begin
                     rba_rd_data <= smc_mem[cur_tag[7:0]];
                     st <= S_RBA_RD_DONE;
                 end
                 S_RBA_RD_DONE: begin
-                    // 数据回填 C 窗 c_line + r=1；更新 cw.r=1
+                    // loc：RBA 读回填 C 窗 c_line（纯数据存储，无占用状态管理/不回写 cw）
                     c_wnd[cur_tid][cur_dma_id].c_line <= rba_rd_data;
-                    c_wnd[cur_tid][cur_dma_id].r <= 1'b1;
-                    cw_upd_vld_r <= 1'b1;
-                    cw_upd_tid_r <= cur_tid;
-                    cw_upd_ind_r <= cur_dma_id;
-                    cw_upd_data_r <= {cw_entry_of(cur_tid, cur_dma_id)[47:27],
-                                      1'b1, // r=1
-                                      cw_entry_of(cur_tid, cur_dma_id)[25:0]};
                     st <= S_NEXT;
                 end
                 S_FREE_RBA: begin
-                    // free：RBA 写（c_line → SMC[tag]），1 拍完成
-                    if (cur_o)
-                        smc_mem[cur_tag[7:0]] <= c_wnd[cur_cn >> 3][cur_cn & 7].c_line;
-                    st <= S_FREE_REL;
-                end
-                S_FREE_REL: begin
-                    // 释放（仅该线程已占据资源时执行）：固定位置清 o
-                    automatic logic [47:0] ce;
-                    ce = cw_entry_of(cur_tid, cur_tgt_ind);
-                    if (cur_o) begin
-                        c_wnd[cur_cn >> 3][cur_cn & 7].o <= 1'b0;
-                        ce[25] = 1'b0; // free 线程 o=0
-                        cw_upd_vld_r <= 1'b1;
-                        cw_upd_tid_r <= cur_tid;
-                        cw_upd_ind_r <= cur_tgt_ind;
-                        cw_upd_data_r <= ce;
-                        st <= S_NEXT;
-                    end else begin
-                        st <= S_NEXT;
-                    end
+                    // free：RBA 写（C 窗 c_line → SMC[tag]），1 拍完成
+                    smc_mem[cur_tag[7:0]] <= c_wnd[cur_tid][cur_dma_id].c_line;
+                    st <= S_NEXT;
                 end
                 S_NEXT: begin
                     if (task_is0 && t1_ok) begin
@@ -300,9 +170,7 @@ module poe_dma_ctrl #(
                         cur_dma_id <= t1_dma_id;
                         cur_tag <= t1_tag;
                         cur_op <= t1_op;
-                        cur_occ <= t1_occ;
-                        cur_cn <= t1_cn;
-                        st <= t1_op ? S_FREE_RBA : S_MISS;
+                        st <= t1_op ? S_FREE_RBA : S_RBA_RD;
                     end else begin
                         st <= S_DONE;
                     end

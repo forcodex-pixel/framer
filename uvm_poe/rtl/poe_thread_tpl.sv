@@ -294,7 +294,7 @@ package poe_thread_tpl_pkg;
         tpl_locked = t;
     endfunction
 
-    // ---- T5：双段持锁线程（7 ts，ts0 lock(1)、ts2 unlock(1)、ts3 lock(2)、ts6 unlock(2)） ----
+    // ---- T5：双段持锁线程（7 ts，同一锁 id=1：ts0 lock、ts2 unlock、ts3 lock、ts6 unlock） ----
     function automatic thread_tpl_t tpl_double_lock();
         thread_tpl_t t;
         automatic logic [BURST_W-1:0] b;
@@ -321,14 +321,14 @@ package poe_thread_tpl_pkg;
                         tpl_iv(1'b0, 3'd2, 1'b0, 1'b1, 3'd2), '0, '0);
         b = tpl_set_lock(tpl_iv(1'b1, 3'd1, 1'b0, 1'b0, 3'd3), 4'd1, 1'b0, 1'b1);
         tpl_put_ts(t, 2, b, '0, '0, '0); // ts2 unlock(1)
-        b = tpl_set_lock(tpl_iv(1'b1, 3'd1, 1'b0, 1'b0, 3'd4), 4'd2, 1'b1, 1'b0);
-        tpl_put_ts(t, 3, b, '0, '0, '0); // ts3 lock(2)
+        b = tpl_set_lock(tpl_iv(1'b1, 3'd1, 1'b0, 1'b0, 3'd4), 4'd1, 1'b1, 1'b0);
+        tpl_put_ts(t, 3, b, '0, '0, '0); // ts3 lock（段2，锁 id=1）
         tpl_put_ts(t, 4, tpl_iv(1'b1, 3'd2, 1'b0, 1'b1, 3'd5),
                         tpl_c(1'b0, 3'd4, 8'd4), '0, '0); // ts4: loc dma4（持锁 2）
         tpl_put_ts(t, 5, tpl_iv(1'b1, 3'd2, 1'b0, 1'b1, 3'd6),
                         tpl_c(1'b0, 3'd5, 8'd4), '0, '0); // ts5: free dma5（配对释放）
-        b = tpl_set_lock(tpl_iv(1'b1, 3'd1, 1'b1, 1'b0, 3'd7), 4'd2, 1'b0, 1'b1);
-        tpl_put_ts(t, 6, b, '0, '0, '0); // ts6 unlock(2)
+        b = tpl_set_lock(tpl_iv(1'b1, 3'd1, 1'b1, 1'b0, 3'd7), 4'd1, 1'b0, 1'b1);
+        tpl_put_ts(t, 6, b, '0, '0, '0); // ts6 unlock（段2，锁 id=1）
         t.vtsk_c = 8'hFF;
         t.dma_c = 8'h30;
         t.cw = {6{48'd0}};

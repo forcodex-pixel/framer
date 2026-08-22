@@ -100,10 +100,6 @@ module tb_top;
     logic [3:0] emit_dma_tidx;
     logic [BURST_W-1:0] emit_dma_burst;
     logic emit_dma_pre;
-    logic cw_upd_vld;
-    logic [5:0] cw_upd_tid;
-    logic [2:0] cw_upd_ind;
-    logic [47:0] cw_upd_data;
     logic cu_done_vld0, cu_done_vld1;
     logic [5:0] cu_done_tid0, cu_done_tid1;
     logic [3:0] cu_done_tidx0, cu_done_tidx1;
@@ -117,8 +113,6 @@ module tb_top;
     .ko_stream(u_if.out_stream), .ko_cid(u_if.out_cid), .ko_pos(u_if.out_pos),
     .ko_pre_vld(u_if.out_pre_vld), .ko_dma_addr(u_if.out_dma_addr), .ko_pre_op(u_if.out_pre_op),
     .ko_rdy(ko_rdy),
-    .cw_upd_vld(cw_upd_vld), .cw_upd_tid(cw_upd_tid),
-    .cw_upd_ind(cw_upd_ind), .cw_upd_data(cw_upd_data),
     .ready_mask(ready_mask),
     .ready_pri(ready_pri),
     .ready_burst_ts(ready_burst_ts),
@@ -206,9 +200,6 @@ module tb_top;
     .emit_dma_tidx(emit_dma_tidx), .emit_dma_burst(emit_dma_burst),
     .emit_dma_pre(emit_dma_pre),
     .csr_dma_c(csr_dma_c), .csr_cw(csr_cw),
-    .thread_curts(ready_curts),
-    .cw_upd_vld(cw_upd_vld), .cw_upd_tid(cw_upd_tid),
-    .cw_upd_ind(cw_upd_ind), .cw_upd_data(cw_upd_data),
     .dma_ack(dma_ack),
     .dma_done_vld(dma_done_vld), .dma_done_tid(dma_done_tid),
     .dma_done_tidx(dma_done_tidx),
@@ -346,20 +337,12 @@ module tb_top;
 
     final begin
         integer i;
-        int tot;
         int idle;
-        tot = 0;
         idle = 0;
         for (i = 0; i < 64; i++) begin
             if (u_thm.th_state[i] == 2'd0) idle++;
-            for (int k = 0; k < 8; k++)
-                if (u_dma.c_wnd[i][k].o) begin
-                    tot++; // C 窗独享占用（应全部释放）
-                    if (tot <= 12)
-                        $fdisplay(thm_logf, "CW_OCC tid=%0d k=%0d tag=%h", i, k, u_dma.c_wnd[i][k].tag);
-                end
         end
-        // 校验：所有线程应回到 IDLE、C 窗独享条目全部释放（loc/free 成对）
-        $fdisplay(thm_logf, "FINAL idle=%0d cw_occ=%0d dma_st=%0d", idle, tot, u_dma.st);
+        // 校验：所有线程应回到 IDLE（C 窗为纯数据存储，无 loc/free 占用状态）
+        $fdisplay(thm_logf, "FINAL idle=%0d dma_st=%0d", idle, u_dma.st);
     end
 endmodule

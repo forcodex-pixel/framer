@@ -24,7 +24,7 @@ POE（Packet Overhead Engine）核处理 fgOTN 业务数据流中的开销指令
 | 无 KO 数据 | 激励/KOA/THM 均不承载 48B 报文，只传有效信息（pri/stream/cid/pos/预读） |
 | 线程模板池 | THM 建线程时从模板池随机取线程描述（ts 结构/burst 模式/CSR 初值） |
 | ts 级互斥锁 | burst 描述声明 lock/unlock（仅 ts 首个 burst 生效），同锁线程互斥执行 |
-| dma_ctrl 简化 | 无 C 窗扫描/指令预存/转交，loc 直接申请、free 直接释放 |
+| dma_ctrl 简化 | 无 C 窗 loc/free 生命周期：只做 RBA 读/写；同地址互斥由 THM 锁在一级发射保证 |
 
 ## 2. 系统架构与数据流
 
@@ -43,7 +43,7 @@ th_sch（一级发射，全局 (pri,tid) 取前 2，每拍 ≤2）
    ▼
 burst_sch（二级发射，ts==cur_ts 等条件）
    ├─ i/v_task → CU0/CU1（计算桩）→ cu_done
-   └─ c_task  → dma_ctrl（loc/free + C 窗 + RBA/SMC）→ dma_done
+   └─ c_task  → dma_ctrl（loc=RBA读 / free=RBA写，C 窗纯数据存储）→ dma_done
 ```
 
 完成反馈（cu_done / dma_done）携带 ts 序号回 THM，驱动 `cur_ts` 推进与锁释放。
@@ -82,9 +82,9 @@ burst_sch（二级发射，ts==cur_ts 等条件）
 
 - 线程 = 若干 ts（1..16，编号可跳转），每个 ts = 若干 burst（1..4）；
 - ts0 固定 1 个单 i_task burst；
-- 同一配对（同 tag/同锁）的 c_task loc/free 有先后依赖，分处**不同 ts**，
-  顺序由 burst_sch 的 `ts == cur_ts` 检查保证；不同锁/不同 tag 的 loc/free
-  相互独立，无先后要求；
+- 同一配对（同 tag/同锁）的 c_task loc/free 存在 RBA 读→写的数据先后依赖，
+  分处**不同 ts**，顺序由 burst_sch 的 `ts == cur_ts` 检查保证；不同锁/
+  不同 tag 的 loc/free 相互独立，无先后要求；
 - 每 ts 首个 burst（st=1）可声明 ts 级锁操作；
 - 线程描述（ts 数/编号/burst 模式/pri/vtsk_c/dma_c/cw）由 THM 从模板池随机选取。
 
@@ -93,7 +93,7 @@ burst_sch（二级发射，ts==cur_ts 等条件）
 `err(8)/ccr(64)/sys_ts(48)/th_id(6)/th_stat(8)/o_mes(8)/cur_ts(8)/vtsk_c(8)/dma_c(8)/tw(64)/cw(8×48)`。
 
 - `dma_c`：c_task 执行掩码（dma_id 查询）；`cw`：c_task 操作表（tag/op_type/r/o/c_line_num/...）；
-- 建线程时同步生成，状态机与 dma_ctrl 回写维护。
+- 建线程时由模板初始化；dma_ctrl **只读**（按 dma_id 查 op_type/tag），不回写。
 
 ### 3.5 ts 级互斥锁表（16 个）
 
@@ -108,14 +108,14 @@ burst_sch（二级发射，ts==cur_ts 等条件）
 
 | 结构 | 定义 | 说明 |
 | --- | --- | --- |
-| 每线程独享 | 64×8 固定位置（全局号 = tid×8 + dma_id） | cw 8 项全部映射，无共享池 / FIFO / 占用计数 |
+| 每线程独享 | 64×8 固定位置（全局号 = tid×8 + dma_id） | cw 8 项全部映射，纯数据存储，无 loc/free 生命周期 |
 
 C 窗条目 168bit：`tag(20)/c_line(128)/d/o/r/cnt(9)/ind(8)`。
 
 - C 窗地址即 cw 条目索引：cw 条目 k（dma_id=k）固定对应 `c_wnd[tid][k]`；
-- `cw.c_line_num` / C 窗条目 `ind` 只存线程内位置索引（= dma_id，0..7）；
-  全局位置 `tid×8+dma_id` 最大 511，需 9bit，由 dma_ctrl 内部计算
-  （禁止用 8bit 存全局号，tid≥32 时回绕会释放到错误线程）。
+- dma_ctrl 只读 cw（op_type/tag）执行 RBA 读/写，**不再维护**
+  C 窗 o/d/r/cnt/ind，也不回写 cw 的 r/o/c_line_num/start_ts/occ_ts
+  （cw 条目 / C 窗条目字段保留定义）。
 
 ## 4. KOA（输入调度）
 
@@ -164,7 +164,9 @@ C 窗条目 168bit：`tag(20)/c_line(128)/d/o/r/cnt(9)/ind(8)`。
 - `th_sel_ts ∈ [th_ts_idx, th_ts_idx+1]`（只提前 ≤1 个 ts）；
 - ts 级锁：当前 burst 若 `st=1 && lock_req=1`，仅当锁空闲或本线程持有时可发射。
 
-发射拍：lock burst 且锁空闲 → 登记 `lock_owner[lock_id]=tid`。
+发射拍：lock burst 且锁空闲 → 登记 `lock_owner[lock_id]=tid`；
+**同拍互斥**：th_sch 对两个 winner 若同为同锁 id 的 loc burst（st=1 && lock_req），
+只发高优先者，次者保持 READY 下拍重选。
 
 ### 5.5 cur_ts 推进
 
@@ -194,8 +196,8 @@ th_need[ts] / th_off / th_sel_ts / th_sel_idx`。
 
 - 公共条件：`ts == 线程当前 cur_ts`（pre 插队跳过）、非 O 窗反压；
   依赖 burst 分处不同 ts，该条件保证 loc/free 等先后顺序；
-- c_task 附加：无需资源预检——C 窗每线程独享 8 个固定位置，loc/free 由 ts 级
-  互斥锁保证成对与互斥，只要满足公共条件即放行；
+- c_task 附加：无需资源预检/冲突检查——C 窗每线程独享且无 loc/free 生命周期，
+  同地址互斥由 THM 锁在一级发射保证，只要满足公共条件即放行；
 - 路由：i/v → CU0/CU1；c_task → dma_ctrl（dma 单路，双 c_task 同拍只发 q0）。
 
 ## 8. CU / EU
@@ -207,28 +209,26 @@ th_need[ts] / th_off / th_sel_ts / th_sel_idx`。
 
 ### 9.1 定位
 
-执行 c_task（loc/free），维护 C 窗缓存（每线程独享 8 位置）与 SMC/RBA 模型。
-互斥锁保证同一地址无并发，因此无扫描查重/指令预存/转交。
+执行 c_task（loc= RBA 读 / free= RBA 写），C 窗为每线程独享的纯数据存储
+（只存 c_line）。同地址互斥由 THM 锁在一级发射保证，dma_ctrl 不再做任何
+tag 相同/冲突检查，也不回写 CSR.cw。
 
 ### 9.2 loc（0）
 
-- 写固定位置（全局号 = tid×8 + dma_id）的 C 窗条目（o=1、ind=dma_id）；
-- 更新 CSR.cw（o=1、c_line_num=dma_id、start_ts、occ_ts）；
-- RBA 读 SMC 回填 c_line 并置 r=1。
+- RBA 读 SMC[tag] → 回填 `c_wnd[tid][dma_id].c_line`（2 拍延迟）；
+- 不做任何 C 窗占用/生命周期管理，不回写 cw。
 
 ### 9.3 free（1）
 
 - RBA 把 C 窗 c_line 写回 SMC[tag]；
-- 释放：按（cur_tid，tag 匹配出的 loc 条目索引）以 9bit 计算全局位置，清该位置 o
-  （不依赖 cw.c_line_num 的存储值，避免 tid≥32 时 8bit 回绕）；
-- 更新 CSR.cw（o=0）。
+- 直接读写本线程固定位置 `c_wnd[tid][dma_id]`（无 tag 匹配、无释放状态、不回写 cw）。
 
 ### 9.4 状态机
 
 ```text
 IDLE → LOAD（拆任务）
-  loc  → MISS(申请+写C窗+更新cw) → RBA_RD → RBA_RD_DONE(回填) → NEXT
-  free → FREE_RBA(写SMC) → FREE_REL(释放) → NEXT
+  loc  → RBA_RD → RBA_RD_DONE(回填 c_line) → NEXT
+  free → FREE_RBA(写SMC) → NEXT
 → DONE（回 dma_done{tid, ts_idx}）→ IDLE
 ```
 
@@ -249,7 +249,7 @@ IDLE → LOAD（拆任务）
 | ts / burst 上限 | 16 / 4 |
 | burst 位宽 | 38bit |
 | 锁表 | 16 × 6bit |
-| C 窗 | 每线程独享 8 位置（64×8，全局号 tid×8+dma_id，9bit） |
+| C 窗 | 每线程独享 8 位置（64×8，纯数据存储，无 loc/free 生命周期） |
 | cw 条目 / C 窗条目 | 48bit / 168bit |
 | KO 有效信息 | 111bit/条（KOA 缓存项） |
 | 完成反馈 | {vld, tid(6), ts_idx(4)} |
